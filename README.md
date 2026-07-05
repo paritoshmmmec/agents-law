@@ -2,9 +2,10 @@
 
 ![Evidence Gate — deterministic runtime enforcement for agent tool calls](./assets/banner.svg)
 
-> **Status: work in progress (prototype).** The core gate, engine, audit chain,
-> and a real LLM agent all work today (see [Roadmap](#roadmap)). APIs may still
-> shift before a tagged release.
+> **Status: alpha (v0.2.0).** The core gate, engine, audit chain, cross-key
+> `compare` rules, a real RESTRICT degradation path, trace-derived manifests, and
+> a live LLM agent all work today (see [Roadmap](#roadmap)). APIs are stabilizing
+> but may still shift before v1.0.
 
 A deterministic runtime enforcement layer that forces an agent to prove its
 reasoning against ground-truth evidence **before** a state-changing action is
@@ -23,9 +24,10 @@ See [`DESIGN.md`](./DESIGN.md) for the full architecture and
 ## Quick start
 
 ```bash
-uv sync                       # install deps into .venv
-uv run examples/demo_agent.py # watch the marketing tripwire in action
-uv run pytest                 # 28 tests: failure modes, determinism, audit chain
+uv sync                        # install deps into .venv
+uv run examples/demo_agent.py  # marketing tripwire: the four failure modes
+uv run examples/refund_agent.py # refund tripwire: cross-key compare + RESTRICT
+uv run pytest                  # 45 tests: failure modes, determinism, audit chain
 ```
 
 ## Running a real agent
@@ -76,7 +78,7 @@ The four evidence failure modes map to deliberate verdicts:
 ## Usage
 
 ```python
-from evidence_gate import Gate, PolicySet
+from evidence_gate import Effect, Gate, PolicySet
 
 gate = Gate(PolicySet.from_dir("policies"))
 
@@ -85,13 +87,38 @@ if result.allowed:                       # ALLOW or RESTRICT
     tool.execute(action.payload)
 ```
 
-Or wrap a tool function directly:
+Or wrap a tool function directly. On `RESTRICT` the tool still runs but is told
+so via `effect=`, and degrades its own payload:
 
 ```python
-@gate.enforce(action="marketing.send_sequence")
-def send_sequence(payload, effect):
+@gate.enforce(action="billing.issue_refund")
+def issue_refund(payload, effect):
+    amount = payload["refund_amount"]
+    if effect is Effect.RESTRICT:          # over the auto-approve ceiling
+        amount = min(amount, 5000)         # execute a capped partial, not the full ask
     ...  # runs only on ALLOW/RESTRICT; raises ActionBlocked on BLOCK;
          # returns a pending GateResult on REVIEW
+```
+
+**Cross-key rules.** A `compare` block relates one evidence key to another key or
+a literal threshold — the constraint the per-key requirements can't express:
+
+```yaml
+- id: refund_within_order_total
+  compare: { left_key: "refund.amount", op: "<=", right_key: "order.total" }
+  effect_on_fail: block            # can't refund more than was ever charged
+```
+
+**Trace-derived manifests.** Instead of the agent declaring its own manifest, the
+gate can assemble one from the tool calls it actually made, via explicit
+extractors (deterministic, no LLM):
+
+```python
+from evidence_gate import ManifestBuilder, ToolCall
+
+builder = ManifestBuilder().register("get_optin", optin_extractor)
+manifest = builder.build(recorded_tool_calls, compiled_at=now)
+gate.check(action, manifest)       # evaluated identically to an agent-supplied one
 ```
 
 ## Layout
@@ -99,13 +126,14 @@ def send_sequence(payload, effect):
 ```
 evidence_gate/
   schemas.py   # EvidenceItem, EvidenceManifest, ProposedAction, Decision
-  policy.py    # typed rule models + YAML loader
+  policy.py    # typed rule models (incl. Comparison) + YAML loader
   engine.py    # evaluate() — pure, deterministic
   gate.py      # Gate.check() + @enforce decorator
   audit.py     # hash-chained append-only log
   review.py    # human-in-the-loop routing
+  trace.py     # ManifestBuilder — derive a manifest from tool-call traces
 policies/      # marketing.yaml, refund.yaml
-examples/      # demo_agent.py (fake agent), llm_agent.py (real LLM behind the gate)
+examples/      # demo_agent.py, refund_agent.py (RESTRICT), llm_agent.py (real LLM)
 tests/         # golden + property tests
 ```
 
@@ -121,18 +149,20 @@ tests/         # golden + property tests
 - [x] Hash-chained, tamper-evident audit log; audited human-review resolution
 - [x] In-memory review queue that never breaks the agent loop
 - [x] Real LLM agent (`examples/llm_agent.py`) driving the gate end-to-end
-- [x] 28 golden + property tests
+- [x] **`RESTRICT` execution path** — a real payload-degradation example (large
+      refund → capped partial) via `examples/refund_agent.py`
+- [x] **Cross-key `compare` rules** — `refund.amount ≤ order.total` and literal
+      thresholds, as a named engine primitive (DESIGN §12.4)
+- [x] **Trace-derived manifests** — a `ManifestBuilder` that assembles a manifest
+      from recorded tool-call traces via explicit extractors (DESIGN §12.1)
+- [x] 45 golden + property tests
 
 **In progress / next**
 
-- [ ] **`RESTRICT` execution path** — the effect and routing exist; a concrete
-      payload-degradation example (e.g. large refund → partial) is still a stub.
-- [ ] **Trace-derived manifests** — a `ManifestBuilder` seam so the gate can
-      assemble a manifest from tool-call traces, not just an agent-supplied one
-      (DESIGN §12.1).
-- [ ] **Cross-key rules** — a `compare_keys` primitive for constraints like
-      "refund ≤ order total"; the requirement model is already shaped for it
-      without an engine rewrite (DESIGN §12.4).
+- [ ] **A trace adapter** — normalize LangSmith / Langfuse / OpenAI logs into the
+      `ToolCall` shape `ManifestBuilder` already consumes.
+- [ ] **`compare` in the live agent path** — the refund cross-key rule runs in
+      `examples/refund_agent.py`; wiring it behind the live LLM loop is next.
 
 **Deliberately deferred** (see [`DESIGN.md`](./DESIGN.md) §9)
 

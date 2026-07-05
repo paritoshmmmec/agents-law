@@ -7,7 +7,7 @@ Review / Block. No LLM runs inside the gate. See DESIGN.md.
 
 from evidence_gate.audit import AuditLog
 from evidence_gate.gate import ActionBlocked, Gate, GateResult
-from evidence_gate.policy import PolicySet
+from evidence_gate.policy import Comparison, PolicySet
 from evidence_gate.review import InMemoryReviewQueue, ReviewQueue
 from evidence_gate.schemas import (
     Decision,
@@ -18,20 +18,25 @@ from evidence_gate.schemas import (
     ProposedAction,
     RuleResult,
 )
+from evidence_gate.trace import Extractor, ManifestBuilder, ToolCall
 
 __all__ = [
     "ActionBlocked",
     "AuditLog",
+    "Comparison",
     "Decision",
     "Effect",
     "EvidenceItem",
     "EvidenceManifest",
     "EvidenceSource",
+    "Extractor",
     "Gate",
     "GateResult",
     "InMemoryReviewQueue",
+    "ManifestBuilder",
     "PolicySet",
     "ProposedAction",
     "ReviewQueue",
     "RuleResult",
+    "ToolCall",
 ]

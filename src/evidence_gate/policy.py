@@ -10,12 +10,16 @@ from __future__ import annotations
 
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
 from evidence_gate.schemas import Effect, EvidenceSource
+
+# The comparison operators the engine knows how to evaluate. Ordering/relational
+# ops (`<`, `<=`, `>`, `>=`) require numeric operands; `==` / `!=` do not.
+CompareOp = Literal["<", "<=", ">", ">=", "==", "!="]
 
 
 class Duration(BaseModel):
@@ -53,13 +57,44 @@ class Requirement(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class Comparison(BaseModel):
+    """A constraint relating one evidence key's value to another key or a literal.
+
+    This is the cross-key primitive (DESIGN §12.4): the constraint the fixed
+    per-key `Requirement` set cannot express, e.g. `refund.amount <= order.total`.
+    Exactly one of `right_key` / `right_value` is set — comparing a key against
+    another key, or against an authored literal threshold.
+
+    The comparison is evaluated over the *representative* value for each key
+    (the newest qualifying observed item), so it composes with the same evidence
+    the requirements already vet. A missing operand fails the rule rather than
+    silently passing — an absent left/right value is treated as unprovable.
+    """
+
+    left_key: str
+    op: CompareOp
+    right_key: str | None = None
+    right_value: Any = None
+
+    @model_validator(mode="after")
+    def _exactly_one_rhs(self) -> Comparison:
+        has_key = self.right_key is not None
+        has_value = self.right_value is not None
+        if has_key == has_value:
+            raise ValueError(
+                "comparison needs exactly one of right_key / right_value "
+                f"(left_key={self.left_key!r})"
+            )
+        return self
+
+
 class Rule(BaseModel):
     """One rule governing an action.
 
-    A rule either checks `Requirement`s for a key or forbids conflicting
-    evidence on a set of keys. The effects fired on failure are explicit, so the
-    four failure modes (missing/stale/conflicting/unauthorized) each land on a
-    deliberate verdict.
+    A rule checks `Requirement`s for a key, forbids conflicting evidence on a set
+    of keys, or asserts a cross-key `Comparison`. The effects fired on failure
+    are explicit, so the four failure modes (missing/stale/conflicting/
+    unauthorized) each land on a deliberate verdict.
     """
 
     id: str
@@ -67,18 +102,20 @@ class Rule(BaseModel):
 
     requirements: list[Requirement] = Field(default_factory=list)
     forbid_conflicts_on: list[str] = Field(default_factory=list)
+    compare: Comparison | None = None
 
-    # `effect_on_fail` covers missing / wrong-value / unauthorized-source.
-    # `effect_on_stale` is used specifically when only the `max_age` check fails,
-    # letting "stale" route to REVIEW while a missing fact hard-BLOCKs.
+    # `effect_on_fail` covers missing / wrong-value / unauthorized-source and a
+    # failed `compare`. `effect_on_stale` is used specifically when only the
+    # `max_age` check fails, letting "stale" route to REVIEW while a missing fact
+    # hard-BLOCKs.
     effect_on_fail: Effect = Effect.BLOCK
     effect_on_stale: Effect | None = None
 
     @model_validator(mode="after")
     def _needs_a_check(self) -> Rule:
-        if not self.requirements and not self.forbid_conflicts_on:
+        if not self.requirements and not self.forbid_conflicts_on and self.compare is None:
             raise ValueError(
-                f"rule {self.id!r} has neither requirements nor forbid_conflicts_on"
+                f"rule {self.id!r} has no requirements, forbid_conflicts_on, or compare"
             )
         return self
 

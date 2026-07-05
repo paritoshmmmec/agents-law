@@ -13,7 +13,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from evidence_gate.policy import Policy, Requirement, Rule
+import operator
+
+from evidence_gate.policy import Comparison, Policy, Requirement, Rule
 from evidence_gate.schemas import (
     Decision,
     Effect,
@@ -21,6 +23,17 @@ from evidence_gate.schemas import (
     EvidenceManifest,
     RuleResult,
 )
+
+# Named, total functions — no `eval`, no expression language (DESIGN §5.1).
+_COMPARATORS = {
+    "<": operator.lt,
+    "<=": operator.le,
+    ">": operator.gt,
+    ">=": operator.ge,
+    "==": operator.eq,
+    "!=": operator.ne,
+}
+_RELATIONAL = {"<", "<=", ">", ">="}
 
 
 def evaluate(
@@ -85,6 +98,16 @@ def _evaluate_rule(rule: Rule, manifest: EvidenceManifest, now: datetime) -> Rul
             )
             return RuleResult(
                 rule_id=rule.id, effect=effect, reason=reason, evidence_refs=refs
+            )
+
+    # Cross-key comparison (e.g. refund.amount <= order.total). Evaluated last,
+    # after the per-key requirements have vetted the operands' provenance.
+    if rule.compare is not None:
+        failure = _check_comparison(rule.compare, manifest)
+        if failure is not None:
+            reason, refs = failure
+            return RuleResult(
+                rule_id=rule.id, effect=rule.effect_on_fail, reason=reason, evidence_refs=refs
             )
 
     return RuleResult(rule_id=rule.id, effect=Effect.ALLOW, reason="ok")
@@ -156,6 +179,61 @@ def _non_freshness_reason(req: Requirement, item: EvidenceItem) -> str | None:
     if req.min_confidence is not None and item.confidence < req.min_confidence:
         return f"confidence {item.confidence} below floor {req.min_confidence}"
     return None
+
+
+def _representative(items: list[EvidenceItem]) -> EvidenceItem | None:
+    """The item that speaks for a key in a comparison: newest observed one.
+
+    Prefers directly-observed items over inferred ones, then most recent. This
+    keeps a stale or inferred duplicate from silently setting the compared value.
+    """
+    if not items:
+        return None
+    observed = [it for it in items if it.observed]
+    pool = observed or items
+    return max(pool, key=lambda it: it.observed_at)
+
+
+def _check_comparison(cmp: Comparison, manifest: EvidenceManifest) -> tuple[str, list[str]] | None:
+    """Evaluate a cross-key/threshold comparison. None on pass, (reason, refs) on fail."""
+    left = _representative(manifest.by_key(cmp.left_key))
+    if left is None:
+        return (f"comparison needs evidence for {cmp.left_key!r}, none present", [])
+
+    refs = [left.id]
+    if cmp.right_key is not None:
+        right_item = _representative(manifest.by_key(cmp.right_key))
+        if right_item is None:
+            return (f"comparison needs evidence for {cmp.right_key!r}, none present", refs)
+        right_val: object = right_item.value
+        right_label = cmp.right_key
+        refs.append(right_item.id)
+    else:
+        right_val = cmp.right_value
+        right_label = repr(cmp.right_value)
+
+    fn = _COMPARATORS[cmp.op]
+    if cmp.op in _RELATIONAL and not (
+        _is_number(left.value) and _is_number(right_val)
+    ):
+        return (
+            f"comparison {cmp.left_key} {cmp.op} {right_label} needs numeric operands, "
+            f"got {left.value!r} and {right_val!r}",
+            refs,
+        )
+
+    if not fn(left.value, right_val):
+        return (
+            f"comparison failed: {cmp.left_key}={left.value!r} {cmp.op} {right_label}"
+            + (f"={right_val!r}" if cmp.right_key is not None else ""),
+            refs,
+        )
+    return None
+
+
+def _is_number(v: object) -> bool:
+    # bool is an int subclass; exclude it so True/False never sort as 1/0 here.
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
 def _find_conflict(

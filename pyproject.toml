@@ -1,6 +1,6 @@
 [project]
 name = "evidence-gate"
-version = "0.1.0"
+version = "0.2.0"
 description = "A deterministic runtime enforcement gate that checks an agent's evidence before a state-changing action executes."
 readme = "README.md"
 authors = [
