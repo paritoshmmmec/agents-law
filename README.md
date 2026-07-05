@@ -173,3 +173,35 @@ tests/         # golden + property tests
 - [ ] **Cryptographic signing** with real keys — HMAC/asymmetric is a drop-in
       upgrade over today's hash chain.
 - [ ] **RBAC/ABAC** — assumed upstream; the gate is orthogonal and additive.
+
+## First shippable version (v0.2.0 alpha)
+
+This is the first version that is coherent enough to hand to someone else and
+have them gate a real action end-to-end. The bar for "shippable" was: **every
+part of the thesis is exercised by a runnable example and pinned by a test — no
+stubs on the critical path.**
+
+What that means concretely:
+
+- **A real agent can drive it.** `examples/llm_agent.py` puts a live LLM behind
+  the gate; the model gathers evidence and *wants* to send in every case, and the
+  gate — not the model — decides ALLOW / REVIEW / BLOCK.
+- **All four verdicts execute, not just three.** `RESTRICT` is no longer a stub:
+  `examples/refund_agent.py` degrades an over-ceiling refund to a capped partial
+  and hard-BLOCKs a refund exceeding the order total.
+- **Rules can span keys.** The `compare` primitive expresses
+  `refund.amount ≤ order.total` and literal thresholds as named, `eval`-free
+  operators.
+- **Manifests can come from execution, not just self-report.** `ManifestBuilder`
+  derives an `EvidenceManifest` from recorded tool-call traces via explicit
+  extractors, converging on the exact schema the gate already evaluates.
+- **Everything is recorded and reproducible.** Every `check()` appends a
+  hash-chained audit record; the engine is a pure function of
+  `(action, manifest, policy, now)`; 45 golden + property tests lock the four
+  failure modes, aggregation, determinism, and chain integrity.
+
+Ship boundary — what is intentionally *not* in v0.2.0: the standalone HTTP
+service, real-key signing, the trace-log adapter, and the offline policy
+compiler. Each has a seam left open (see [`DESIGN.md`](./DESIGN.md) §9, §13) so
+it is additive, not a rewrite. APIs are stabilizing but may still shift before
+v1.0.

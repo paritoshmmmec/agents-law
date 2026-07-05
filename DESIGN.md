@@ -414,4 +414,106 @@ tests/
    covers the spec's examples. Cross-key comparisons (e.g. "refund ≤ order total")
    are not in v1; the requirement model is structured so a `compare_keys`
    primitive can be added without reworking the engine.
+
+---
+
+## 13. First shippable version (v0.2.0 alpha)
+
+The prototype (§9) proved the thesis on the marketing tripwire. v0.2.0 is the
+first version we consider **shippable**: every leg of the thesis is exercised by
+a runnable example and pinned by a test, with no stub on the critical path. Three
+decisions from §12 that were "seam left open" are now realized.
+
+### 13.1 What shipped
+
+| Capability | Where | Realizes |
+|---|---|---|
+| Cross-key `compare` primitive | `policy.py:Comparison`, `engine.py:_check_comparison` | §12.4 (`compare_keys`) |
+| `RESTRICT` execution path (real degradation) | `policies/refund.yaml`, `examples/refund_agent.py` | §12.2 |
+| Trace-derived manifests | `trace.py:ManifestBuilder` / `ToolCall` | §12.1 (second manifest path) |
+| Live LLM behind the gate | `examples/llm_agent.py` | §1 thesis, end-to-end |
+
+### 13.2 The `compare` primitive
+
+A rule may carry one `Comparison` relating the representative value of one
+evidence key to another key or an authored literal:
+
+```yaml
+- id: refund_within_order_total
+  compare: { left_key: "refund.amount", op: "<=", right_key: "order.total" }
+  effect_on_fail: block            # can never refund more than was charged
+- id: refund_under_auto_ceiling
+  compare: { left_key: "refund.amount", op: "<=", right_value: 5000 }
+  effect_on_fail: restrict         # over the ceiling -> capped partial, not blocked
+```
+
+Design properties, consistent with §5:
+
+- **Named operators, no expression language.** `op` is one of
+  `< <= > >= == !=`, each dispatched to a Python `operator` function. No `eval`,
+  no parser.
+- **Numeric guard.** Relational ops (`< <= > >=`) require numeric operands;
+  `bool` is explicitly *not* a number, so `True` can never sort as `1`. Equality
+  ops (`== !=`) work on any value.
+- **Representative value.** For each key the comparison uses the newest
+  *observed* item (`engine._representative`), so a stale or inferred duplicate
+  can't quietly set the compared value. This composes with the per-key
+  requirements that already vet provenance and freshness.
+- **Unprovable ⇒ fail.** A missing left or right operand fails the rule (routed
+  by `effect_on_fail`) rather than silently passing — an absent value is not
+  evidence of compliance.
+
+`Comparison` validates that exactly one of `right_key` / `right_value` is set.
+The engine evaluates `compare` *after* the rule's `requirements`, so operand
+provenance is vetted before the arithmetic.
+
+### 13.3 The `RESTRICT` path, made concrete
+
+`RESTRICT` was always a first-class effect (§12.2) but had no executing example.
+The refund policy now yields it: a refund over the auto-approve ceiling is
+degraded rather than refused. The `@gate.enforce` decorator passes the decided
+`effect` into the tool, which degrades its own payload:
+
+```python
+@gate.enforce(action="billing.issue_refund")
+def issue_refund(payload, effect):
+    amount = payload["refund_amount"]
+    if effect is Effect.RESTRICT:
+        amount = min(amount, 5000)     # execute a capped partial
+    return {"refunded": amount, "mode": effect.value}
+```
+
+Same manifest, three verdicts, all recorded: `4000 → ALLOW (4000)`,
+`6500 → RESTRICT (5000)`, `9000 → BLOCK` (exceeds order total).
+
+### 13.4 Trace-derived manifests
+
+§12.1 resolved manifest ownership as "both": agent-supplied *and* gate-built.
+v0.1 shipped only the agent-supplied path. `ManifestBuilder` adds the second:
+register a deterministic `Extractor` per tool, and `build(calls, compiled_at)`
+maps a recorded `ToolCall` trace into an `EvidenceManifest`. It adds **no**
+evaluation logic — both paths converge on the same validated schema before the
+engine runs. A tool with no registered extractor contributes nothing; evidence
+is opt-in, never inferred. A `ToolCall` is the minimal normalized shape a
+LangSmith / Langfuse / OpenAI-log adapter would target — that adapter is the next
+increment (§9), and it feeds this seam without touching the engine.
+
+### 13.5 Ship boundary
+
+Intentionally **not** in v0.2.0, each with its seam already open so it stays
+additive rather than a rewrite:
+
+- **HTTP gate service** — `check()` is a pure request/response; FastAPI is a wrapper.
+- **Real-key signing** — the hash chain's `_hash` swaps for HMAC/asymmetric in place.
+- **Trace-log adapter** — normalizes vendor logs into the `ToolCall` shape above.
+- **Offline policy compiler** — an authoring convenience; the runtime never needs it.
+
+### 13.6 Verification bar
+
+The version is "shippable" because the whole surface is pinned: **45 golden +
+property tests** cover the four failure modes, most-restrictive aggregation,
+deny-by-default, the `compare` operand/numeric-guard cases, RESTRICT degradation
+through the decorator, trace-derived manifests driving real verdicts, and
+hash-chain tamper/reorder detection. Determinism is asserted directly —
+identical `(action, manifest, policy, now)` yields a byte-identical `Decision`.
 ```
