@@ -1,0 +1,31 @@
+# A refund requires an observed order and a fresh, observed payment record.
+# Demonstrates a second action and RESTRICT (large refunds are degraded to a
+# review-backed partial rather than blocked outright).
+version: "2026-07-05.1"
+action: "billing.issue_refund"
+rules:
+  - id: order_must_exist
+    description: "There must be a real, observed order to refund against."
+    requirements:
+      - key: "order.id"
+        must_exist: true
+        source_in: [tool_result]
+        observed: true
+    effect_on_fail: block
+
+  - id: payment_fresh
+    description: "Payment record must be observed and recent."
+    requirements:
+      - key: "order.paid"
+        must_exist: true
+        equals: true
+        source_in: [tool_result]
+        observed: true
+        max_age: { days: 180 }
+    effect_on_fail: block
+    effect_on_stale: review
+
+  - id: no_amount_conflict
+    description: "Sources must agree on the refundable amount."
+    forbid_conflicts_on: ["order.amount"]
+    effect_on_fail: review

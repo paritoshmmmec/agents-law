@@ -1,0 +1,22 @@
+# A marketing workflow cannot be triggered unless the user's opt-in is verified,
+# observed, from an authorized source, and less than 12 months old.
+version: "2026-07-05.1"
+action: "marketing.send_sequence"
+rules:
+  - id: opt_in_required
+    description: "Marketing requires a verified, fresh, observed opt-in."
+    requirements:
+      - key: "marketing.opt_in"
+        must_exist: true            # missing -> effect_on_fail (block)
+        equals: true                # must actually be opted in
+        source_in: [tool_result, retrieval]   # not memory/inference -> block
+        observed: true              # inferred opt-in is not good enough
+        max_age: { months: 12 }     # older than 12 months -> effect_on_stale
+        min_confidence: 0.9
+    effect_on_fail: block
+    effect_on_stale: review
+
+  - id: no_opt_in_conflict
+    description: "Two sources must not disagree about the opt-in."
+    forbid_conflicts_on: ["marketing.opt_in"]
+    effect_on_fail: review
