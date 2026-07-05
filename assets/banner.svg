@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="360" viewBox="0 0 1000 360" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d1117"/>
+      <stop offset="1" stop-color="#161b22"/>
+    </linearGradient>
+    <linearGradient id="allow" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2ea043"/>
+      <stop offset="1" stop-color="#238636"/>
+    </linearGradient>
+    <linearGradient id="block" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f85149"/>
+      <stop offset="1" stop-color="#da3633"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1000" height="360" fill="url(#bg)"/>
+
+  <!-- title -->
+  <text x="60" y="86" fill="#e6edf3" font-size="46" font-weight="700">Evidence Gate</text>
+  <text x="62" y="122" fill="#7d8590" font-size="19">deterministic runtime enforcement for agent tool calls</text>
+
+  <!-- agent (probabilistic) box -->
+  <rect x="60" y="170" width="230" height="120" rx="10" fill="#1f2937" stroke="#30363d" stroke-width="1.5"/>
+  <text x="175" y="205" fill="#e6edf3" font-size="17" font-weight="700" text-anchor="middle">AGENT (LLM)</text>
+  <text x="175" y="232" fill="#8b949e" font-size="13" text-anchor="middle">reasons · builds payload</text>
+  <text x="175" y="252" fill="#8b949e" font-size="13" text-anchor="middle">declares evidence</text>
+  <text x="175" y="278" fill="#58a6ff" font-size="12" text-anchor="middle" font-style="italic">probabilistic</text>
+
+  <!-- arrow -->
+  <line x1="290" y1="230" x2="372" y2="230" stroke="#484f58" stroke-width="2"/>
+  <polygon points="372,230 362,225 362,235" fill="#484f58"/>
+  <text x="331" y="220" fill="#6e7681" font-size="11" text-anchor="middle">action +</text>
+  <text x="331" y="248" fill="#6e7681" font-size="11" text-anchor="middle">manifest</text>
+
+  <!-- the gate box -->
+  <rect x="378" y="158" width="244" height="144" rx="10" fill="#111827" stroke="#f0b429" stroke-width="2"/>
+  <text x="500" y="190" fill="#f0b429" font-size="18" font-weight="700" text-anchor="middle">EVIDENCE GATE</text>
+  <text x="500" y="216" fill="#8b949e" font-size="12.5" text-anchor="middle">1 · manifest present?</text>
+  <text x="500" y="236" fill="#8b949e" font-size="12.5" text-anchor="middle">2 · rules → decision</text>
+  <text x="500" y="256" fill="#8b949e" font-size="12.5" text-anchor="middle">3 · hash-chained audit</text>
+  <text x="500" y="290" fill="#3fb950" font-size="12" text-anchor="middle" font-style="italic">no LLM · deterministic</text>
+
+  <!-- verdict lanes -->
+  <line x1="622" y1="230" x2="700" y2="230" stroke="#484f58" stroke-width="2"/>
+  <polygon points="700,230 690,225 690,235" fill="#484f58"/>
+
+  <rect x="706" y="172" width="118" height="30" rx="6" fill="url(#allow)"/>
+  <text x="765" y="192" fill="#0d1117" font-size="14" font-weight="700" text-anchor="middle">ALLOW</text>
+
+  <rect x="706" y="208" width="118" height="30" rx="6" fill="#9e6a03"/>
+  <text x="765" y="228" fill="#0d1117" font-size="14" font-weight="700" text-anchor="middle">REVIEW</text>
+
+  <rect x="836" y="172" width="118" height="30" rx="6" fill="#1f6feb"/>
+  <text x="895" y="192" fill="#0d1117" font-size="13" font-weight="700" text-anchor="middle">RESTRICT</text>
+
+  <rect x="836" y="208" width="118" height="30" rx="6" fill="url(#block)"/>
+  <text x="895" y="228" fill="#0d1117" font-size="14" font-weight="700" text-anchor="middle">BLOCK</text>
+
+  <text x="830" y="272" fill="#6e7681" font-size="12" text-anchor="middle">same evidence in → same verdict out, every time</text>
+
+  <text x="60" y="335" fill="#484f58" font-size="12.5">The LLM compiles the payload and declares the evidence. It never decides whether it is ready to act.</text>
+</svg>

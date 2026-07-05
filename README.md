@@ -1,5 +1,11 @@
 # Evidence Gate
 
+![Evidence Gate — deterministic runtime enforcement for agent tool calls](./assets/banner.svg)
+
+> **Status: work in progress (prototype).** The core gate, engine, audit chain,
+> and a real LLM agent all work today (see [Roadmap](#roadmap)). APIs may still
+> shift before a tagged release.
+
 A deterministic runtime enforcement layer that forces an agent to prove its
 reasoning against ground-truth evidence **before** a state-changing action is
 committed.
@@ -102,3 +108,38 @@ policies/      # marketing.yaml, refund.yaml
 examples/      # demo_agent.py (fake agent), llm_agent.py (real LLM behind the gate)
 tests/         # golden + property tests
 ```
+
+## Roadmap
+
+**Working today**
+
+- [x] Typed schemas — `EvidenceItem` / `EvidenceManifest` / `ProposedAction` / `Decision`
+- [x] Deterministic policy engine — pure `evaluate(action, manifest, policy, now)`
+- [x] The seven requirement primitives + the four failure modes (`missing` / `stale`
+      / `conflicting` / `unauthorized`)
+- [x] `Gate.check()` + `@enforce` decorator; deny-by-default for ungoverned actions
+- [x] Hash-chained, tamper-evident audit log; audited human-review resolution
+- [x] In-memory review queue that never breaks the agent loop
+- [x] Real LLM agent (`examples/llm_agent.py`) driving the gate end-to-end
+- [x] 28 golden + property tests
+
+**In progress / next**
+
+- [ ] **`RESTRICT` execution path** — the effect and routing exist; a concrete
+      payload-degradation example (e.g. large refund → partial) is still a stub.
+- [ ] **Trace-derived manifests** — a `ManifestBuilder` seam so the gate can
+      assemble a manifest from tool-call traces, not just an agent-supplied one
+      (DESIGN §12.1).
+- [ ] **Cross-key rules** — a `compare_keys` primitive for constraints like
+      "refund ≤ order total"; the requirement model is already shaped for it
+      without an engine rewrite (DESIGN §12.4).
+
+**Deliberately deferred** (see [`DESIGN.md`](./DESIGN.md) §9)
+
+- [ ] Standalone **HTTP gate service** — `check()` is already a pure
+      request/response; lifting it behind FastAPI is mechanical.
+- [ ] **Offline policy compiler** (SOP text → reviewed rule pack via an LLM).
+- [ ] **Trace ingestion** (LangSmith / Langfuse / OpenAI logs → candidate rules).
+- [ ] **Cryptographic signing** with real keys — HMAC/asymmetric is a drop-in
+      upgrade over today's hash chain.
+- [ ] **RBAC/ABAC** — assumed upstream; the gate is orthogonal and additive.
