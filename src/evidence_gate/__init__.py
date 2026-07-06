@@ -18,7 +18,15 @@ from evidence_gate.schemas import (
     ProposedAction,
     RuleResult,
 )
+from evidence_gate.signing import Signer, TokenExpired, TokenInvalid, Verifier
 from evidence_gate.trace import Extractor, ManifestBuilder, ToolCall
+from evidence_gate.trace_adapters import (
+    NormalizeResult,
+    SimReport,
+    TraceMapping,
+    normalize,
+    simulate,
+)
 
 __all__ = [
     "ActionBlocked",
@@ -34,9 +42,58 @@ __all__ = [
     "GateResult",
     "InMemoryReviewQueue",
     "ManifestBuilder",
+    "NormalizeResult",
     "PolicySet",
     "ProposedAction",
     "ReviewQueue",
     "RuleResult",
+    "SimReport",
+    "Signer",
+    "TokenExpired",
+    "TokenInvalid",
     "ToolCall",
+    "TraceMapping",
+    "Verifier",
+    "normalize",
+    "simulate",
 ]
+
+# Remote surface — depends on the optional `client` / `service` extras. Import
+# lazily so the core library stays importable without fastapi / httpx installed.
+try:  # pragma: no cover - exercised via the extras
+    from evidence_gate.client import (
+        ClearanceDenied,
+        GateUnreachable,
+        RemoteGate,
+        RemoteResult,
+    )
+
+    __all__ += ["ClearanceDenied", "GateUnreachable", "RemoteGate", "RemoteResult"]
+except ImportError:  # httpx not installed (client extra absent)
+    pass
+
+try:  # pragma: no cover - exercised via the extras
+    from evidence_gate.service import create_app
+
+    __all__ += ["create_app"]
+except ImportError:  # fastapi not installed (service extra absent)
+    pass
+
+try:  # pragma: no cover - exercised via the extras
+    from evidence_gate.integrations.langchain import (
+        EvidenceGateCallbackHandler,
+        GatePort,
+        GateVerdict,
+        LocalGatePort,
+        RemoteGatePort,
+    )
+
+    __all__ += [
+        "EvidenceGateCallbackHandler",
+        "GatePort",
+        "GateVerdict",
+        "LocalGatePort",
+        "RemoteGatePort",
+    ]
+except ImportError:  # langchain-core not installed (langchain extra absent)
+    pass
