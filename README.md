@@ -2,10 +2,12 @@
 
 ![Evidence Gate — deterministic runtime enforcement for agent tool calls](./assets/banner.svg)
 
-> **Status: alpha (v0.2.0).** The core gate, engine, audit chain, cross-key
-> `compare` rules, a real RESTRICT degradation path, trace-derived manifests, and
-> a live LLM agent all work today (see [Roadmap](#roadmap)). APIs are stabilizing
-> but may still shift before v1.0.
+> **Status: alpha (v0.3.0).** The core gate, engine, audit chain, cross-key
+> `compare` rules, a real RESTRICT degradation path, and a live LLM agent work
+> today — and v0.3 adds the **integration surface**: a remote HTTP gate service, a
+> fail-closed client with name-pattern instrumentation, HMAC-signed clearance
+> tokens, a Trace-to-Gate replay tool, and a LangChain callback adapter (see
+> [Roadmap](#roadmap)). APIs are stabilizing but may still shift before v1.0.
 
 A deterministic runtime enforcement layer that forces an agent to prove its
 reasoning against ground-truth evidence **before** a state-changing action is
@@ -21,14 +23,94 @@ evidence against explicit rules with **no LLM in the loop**.
 See [`DESIGN.md`](./DESIGN.md) for the full architecture and
 [`problem.md`](./problem.md) for the original requirements.
 
+## Architecture
+
+The gate is a **pure decision seam** — `evaluate(action, manifest, policy, now)` —
+that everything else plugs into. The agent reaches it one of two ways (in-process,
+or over HTTP through the fail-closed client), and the evidence manifest arrives one
+of two ways (declared by the agent, or reconstructed from observed tool calls). All
+paths converge on the *same* deterministic engine; no LLM ever runs inside it.
+
+```mermaid
+flowchart TB
+    subgraph agent["Agent runtime"]
+        LLM["LLM / tool loop"]
+        LC["LangChain callback<br/>(EvidenceGateCallbackHandler)"]
+        LLM -. evidence tools .-> LC
+    end
+
+    subgraph adopt["Adoption surface"]
+        direction LR
+        INPROC["In-process<br/>Gate.check() / @enforce"]
+        REMOTE["RemoteGate<br/>(httpx, fail-closed)"]
+    end
+
+    subgraph evidence["Evidence manifest — two paths"]
+        direction LR
+        DECL["Agent-declared<br/>EvidenceManifest"]
+        RECON["Reconstructed<br/>ManifestBuilder + extractors"]
+    end
+
+    subgraph core["Deterministic core (no LLM)"]
+        GATE["Gate.check()<br/>1. structural validation<br/>2. evaluate<br/>3. audit<br/>4. route"]
+        ENGINE["PolicyEngine.evaluate()<br/>named primitives · no eval"]
+        POLICY[("PolicySet<br/>versioned YAML")]
+        GATE --> ENGINE
+        POLICY --> ENGINE
+    end
+
+    subgraph out["Outputs"]
+        direction LR
+        VERDICT["ALLOW · RESTRICT<br/>REVIEW · BLOCK"]
+        AUDIT[("Hash-chained<br/>audit log")]
+        REVIEW[("Review queue<br/>non-blocking")]
+        TOKEN["Signed clearance token<br/>(HMAC, ALLOW/RESTRICT)"]
+    end
+
+    LC --> INPROC
+    LC --> REMOTE
+    LLM --> INPROC
+    REMOTE -->|POST /v1/check| SVC["FastAPI gate service"]
+    SVC --> GATE
+    INPROC --> GATE
+
+    DECL --> GATE
+    RECON --> GATE
+
+    ENGINE --> VERDICT
+    GATE --> AUDIT
+    VERDICT -->|REVIEW| REVIEW
+    VERDICT -->|ALLOW / RESTRICT| TOKEN
+
+    TRACE["Recorded traces<br/>(LangSmith / Langfuse / OpenAI)"] -. normalize + simulate .-> RECON
+```
+
+Two invariants hold across every path: the engine is a **pure function** of its
+inputs (`now` is injected, never clock-read), and **nothing executes unrecorded** —
+the audit record is appended before `check()` returns.
+
 ## Quick start
 
 ```bash
-uv sync                        # install deps into .venv
-uv run examples/demo_agent.py  # marketing tripwire: the four failure modes
+uv sync                         # install core deps into .venv
+uv run examples/demo_agent.py   # marketing tripwire: the four failure modes
 uv run examples/refund_agent.py # refund tripwire: cross-key compare + RESTRICT
-uv run pytest                  # 45 tests: failure modes, determinism, audit chain
+uv run pytest                   # 89 tests: failure modes, determinism, audit, remote, adapters
 ```
+
+The core gate depends only on `pydantic` + `pyyaml`; `openai`/`python-dotenv` come
+along for the live-LLM example. The remote gate and framework adapters are **optional
+extras**, so nothing that doesn't need FastAPI/httpx/LangChain pulls them in:
+
+```bash
+uv sync --extra service --extra client --extra langchain   # everything
+```
+
+| Extra | Adds | Enables |
+|---|---|---|
+| `service` | `fastapi`, `uvicorn` | `create_app()` — the HTTP gate service |
+| `client`  | `httpx` | `RemoteGate` — the fail-closed remote client |
+| `langchain` | `langchain-core` | `EvidenceGateCallbackHandler` |
 
 ## Running a real agent
 
@@ -121,25 +203,101 @@ manifest = builder.build(recorded_tool_calls, compiled_at=now)
 gate.check(action, manifest)       # evaluated identically to an agent-supplied one
 ```
 
+## Remote gate (service + fail-closed client)
+
+The same pure `check()` lifts behind FastAPI, so the engine and policies can live in
+one place and agents call it over the wire. The client is **fail-closed**: an
+unreachable gate never means "allow."
+
+```python
+# server — the gate service
+from evidence_gate import Gate, PolicySet, Signer, create_app
+
+app = create_app(Gate(PolicySet.from_dir("policies")), signer=Signer(b"secret-key"))
+# uvicorn: `create_app` returns a FastAPI app with /v1/check, /v1/review, /v1/audit
+```
+
+```python
+# client — wrap existing tools by name pattern, no per-call-site rewrite
+from evidence_gate import RemoteGate
+
+gate = RemoteGate("https://gate.internal")
+gate.auto_instrument(tools, {"stripe_*": "billing.issue_refund"})
+
+tools.stripe_refund(45, "late package")   # gated transparently; runs only on ALLOW/RESTRICT
+#   BLOCK            -> raises ClearanceDenied(.reason, .request_id)
+#   gate unreachable -> raises GateUnreachable (tool never runs)
+```
+
+On `ALLOW`/`RESTRICT` the service returns a short-lived **HMAC-signed clearance
+token** (`Signer`/`Verifier`); the client verifies it on receipt. The same key
+signs the audit chain — with `key=None` the chain hash is byte-identical to the
+plain hash, so signing is a backwards-compatible drop-in.
+
+## Trace-to-Gate (replay recorded traces)
+
+Point the gate at the tool-call log an agent *already* produced and see what it
+*would have decided* — the onboarding hook, before wiring anything live.
+
+```python
+from evidence_gate import TraceMapping, normalize, simulate
+
+calls = normalize(trace_records, TraceMapping(tool="name", call_id="id",
+                                              observed_at="ts", result="data.output")).calls
+reports = simulate(calls, gate=gate, builder=builder,
+                   action_mapping={"send_*": "marketing.send_sequence"}, now=now)
+# -> [SimReport(request_id=..., effect=ALLOW/REVIEW/BLOCK, executed=..., reasons=[...])]
+```
+
+`normalize` maps arbitrary vendor exports (dotted field paths) into the `ToolCall`
+shape; a record missing a required field is *skipped and surfaced*, never guessed.
+`simulate` scopes evidence per turn and runs every sensitive call through the
+untouched `gate.check()`. See `examples/trace_replay.py`.
+
+## LangChain adapter
+
+A callback handler that collects the evidence tools an agent runs and gates the
+sensitive one before it executes — against an in-process `Gate` or the remote
+client, via the same handler.
+
+```python
+from evidence_gate import Gate, ManifestBuilder, PolicySet
+from evidence_gate.integrations.langchain import EvidenceGateCallbackHandler, LocalGatePort
+
+port = LocalGatePort(Gate(PolicySet.from_dir("policies")), builder)   # or RemoteGatePort(RemoteGate(...))
+handler = EvidenceGateCallbackHandler(port, action_mapping={"send_*": "marketing.send_sequence"})
+agent.invoke(..., config={"callbacks": [handler]})   # BLOCK/REVIEW raise before the tool runs
+```
+
+See `examples/remote_agent.py`, `examples/trace_replay.py`, and
+`examples/langchain_agent.py` for each path end-to-end.
+
 ## Layout
 
 ```
 evidence_gate/
-  schemas.py   # EvidenceItem, EvidenceManifest, ProposedAction, Decision
-  policy.py    # typed rule models (incl. Comparison) + YAML loader
-  engine.py    # evaluate() — pure, deterministic
-  gate.py      # Gate.check() + @enforce decorator
-  audit.py     # hash-chained append-only log
-  review.py    # human-in-the-loop routing
-  trace.py     # ManifestBuilder — derive a manifest from tool-call traces
-policies/      # marketing.yaml, refund.yaml
-examples/      # demo_agent.py, refund_agent.py (RESTRICT), llm_agent.py (real LLM)
-tests/         # golden + property tests
+  schemas.py         # EvidenceItem, EvidenceManifest, ProposedAction, Decision
+  policy.py          # typed rule models (incl. Comparison) + YAML loader
+  engine.py          # evaluate() — pure, deterministic
+  gate.py            # Gate.check() + @enforce decorator
+  audit.py           # hash-chained append-only log
+  review.py          # human-in-the-loop routing
+  trace.py           # ManifestBuilder — derive a manifest from tool-call traces
+  trace_adapters.py  # normalize() + simulate() — Trace-to-Gate replay
+  signing.py         # HMAC Signer/Verifier — chain hash + clearance tokens
+  service.py         # create_app() — FastAPI gate service        [extra: service]
+  client.py          # RemoteGate — fail-closed client            [extra: client]
+  integrations/
+    langchain.py     # EvidenceGateCallbackHandler + GatePort seam [extra: langchain]
+policies/            # marketing.yaml, refund.yaml
+examples/            # demo_agent, refund_agent (RESTRICT), llm_agent (real LLM),
+                     # remote_agent, trace_replay, langchain_agent
+tests/               # golden + property tests (89)
 ```
 
 ## Roadmap
 
-**Working today**
+**Core — working since v0.2.0**
 
 - [x] Typed schemas — `EvidenceItem` / `EvidenceManifest` / `ProposedAction` / `Decision`
 - [x] Deterministic policy engine — pure `evaluate(action, manifest, policy, now)`
@@ -149,39 +307,80 @@ tests/         # golden + property tests
 - [x] Hash-chained, tamper-evident audit log; audited human-review resolution
 - [x] In-memory review queue that never breaks the agent loop
 - [x] Real LLM agent (`examples/llm_agent.py`) driving the gate end-to-end
-- [x] **`RESTRICT` execution path** — a real payload-degradation example (large
-      refund → capped partial) via `examples/refund_agent.py`
-- [x] **Cross-key `compare` rules** — `refund.amount ≤ order.total` and literal
-      thresholds, as a named engine primitive (DESIGN §12.4)
-- [x] **Trace-derived manifests** — a `ManifestBuilder` that assembles a manifest
-      from recorded tool-call traces via explicit extractors (DESIGN §12.1)
-- [x] 45 golden + property tests
+- [x] **`RESTRICT` execution path** — large refund → capped partial (`examples/refund_agent.py`)
+- [x] **Cross-key `compare` rules** — `refund.amount ≤ order.total` (DESIGN §12.4)
+- [x] **Trace-derived manifests** — `ManifestBuilder` from recorded tool calls (DESIGN §12.1)
 
-**In progress / next**
+**Integration surface — new in v0.3.0**
 
-- [ ] **A trace adapter** — normalize LangSmith / Langfuse / OpenAI logs into the
-      `ToolCall` shape `ManifestBuilder` already consumes.
-- [ ] **`compare` in the live agent path** — the refund cross-key rule runs in
-      `examples/refund_agent.py`; wiring it behind the live LLM loop is next.
+- [x] **HTTP gate service** — `create_app()`, a FastAPI wrapper over `gate.check()`
+      with both manifest paths (`service.py`, extra `service`)
+- [x] **Fail-closed remote client** — `RemoteGate` with name-pattern
+      `auto_instrument`, `ClearanceDenied` / `GateUnreachable` (`client.py`, extra `client`)
+- [x] **Real-key signing** — HMAC `Signer`/`Verifier`; signed clearance tokens on
+      ALLOW/RESTRICT; backwards-compatible audit-chain hash (`signing.py`)
+- [x] **Trace-to-Gate replay** — generic `normalize()` + `simulate()` over the
+      `ManifestBuilder` seam (`trace_adapters.py`)
+- [x] **LangChain adapter** — `EvidenceGateCallbackHandler` over a local/remote
+      `GatePort` seam (`integrations/langchain.py`, extra `langchain`)
+- [x] 89 golden + property + integration tests
+
+**Pending for the alpha line (next)**
+
+- [ ] **Per-vendor trace normalizers** — LangSmith / Langfuse / OpenAI presets over
+      the generic `TraceMapping` (a few lines each; the seam is done).
+- [ ] **More framework adapters** — CrewAI, then LlamaIndex, reusing the `GatePort` seam.
+- [ ] **OTel span events** — `evidence_gate.decision` / `.pending_review`,
+      excluding raw args/prompt/model output (COMPARISON §6 #6).
+- [ ] **Downstream token enforcement** — tokens are issued and verifiable today but
+      not yet *required* by downstream tools; make verification a first-class gate.
+- [ ] **Persistent audit + review backends** — the log/queue are in-memory; add a
+      durable store for multi-process deployments.
 
 **Deliberately deferred** (see [`DESIGN.md`](./DESIGN.md) §9)
 
-- [ ] Standalone **HTTP gate service** — `check()` is already a pure
-      request/response; lifting it behind FastAPI is mechanical.
-- [ ] **Offline policy compiler** (SOP text → reviewed rule pack via an LLM).
-- [ ] **Trace ingestion** (LangSmith / Langfuse / OpenAI logs → candidate rules).
-- [ ] **Cryptographic signing** with real keys — HMAC/asymmetric is a drop-in
-      upgrade over today's hash chain.
+- [ ] **Offline policy compiler** (SOP text → reviewed rule pack via an LLM) +
+      approve/version workflow (COMPARISON §6 #7).
+- [ ] **Trace ingestion → candidate rules** (distinct from replay: mining logs to
+      *propose* policy, not just simulate it).
+- [ ] **Asymmetric signing** — swap HMAC for public-key so verifiers need no shared
+      secret; a drop-in over the current `Signer` (DESIGN §13.5).
 - [ ] **RBAC/ABAC** — assumed upstream; the gate is orthogonal and additive.
 
-## First shippable version (v0.2.0 alpha)
+## Release notes
 
-This is the first version that is coherent enough to hand to someone else and
-have them gate a real action end-to-end. The bar for "shippable" was: **every
-part of the thesis is exercised by a runnable example and pinned by a test — no
-stubs on the critical path.**
+### v0.3.0 alpha — the integration surface
 
-What that means concretely:
+v0.2.0 proved the thesis in-process; v0.3.0 makes it **adoptable** — the goal was
+to close the gap between "a correct engine" and "something an agent builder can put
+in front of a real tool without rewriting their stack," while keeping the engine
+untouched. Everything below is plumbing over the pure `check()` seam:
+
+- **Remote, fail-closed enforcement.** `create_app()` serves the gate over HTTP;
+  `RemoteGate` calls it and refuses to execute when the gate is unreachable — an
+  unavailable gate never silently allows.
+- **Zero-touch instrumentation.** `RemoteGate.auto_instrument(tools, {"stripe_*":
+  ...})` wraps existing tools by name pattern; call sites don't change.
+- **Signed clearance.** HMAC `Signer`/`Verifier` issues short-lived tokens on
+  ALLOW/RESTRICT and — with `key=None` — keeps the audit-chain hash byte-identical,
+  so signing is a backwards-compatible drop-in.
+- **Trace-to-Gate onboarding.** `normalize()` + `simulate()` replay a recorded
+  trace through the gate to show what it *would have decided*, before wiring live.
+- **Framework adapter.** `EvidenceGateCallbackHandler` gates a LangChain agent's
+  sensitive tool call, working against the local `Gate` or the remote client via
+  one `GatePort` seam.
+
+Verified: 89 tests pass (45 original, unchanged); the audit chain is regression-clean
+(unsigned == identical hashes); the base package imports without any extra; and all
+three new examples run end-to-end (both manifest paths agree; fail-closed raises
+without executing).
+
+### v0.2.0 alpha — the core
+
+The first version coherent enough to hand to someone else and have them gate a real
+action end-to-end. The bar for "shippable" was: **every part of the thesis is
+exercised by a runnable example and pinned by a test — no stubs on the critical
+path.** What that means concretely:
 
 - **A real agent can drive it.** `examples/llm_agent.py` puts a live LLM behind
   the gate; the model gathers evidence and *wants* to send in every case, and the
@@ -200,8 +399,8 @@ What that means concretely:
   `(action, manifest, policy, now)`; 45 golden + property tests lock the four
   failure modes, aggregation, determinism, and chain integrity.
 
-Ship boundary — what is intentionally *not* in v0.2.0: the standalone HTTP
-service, real-key signing, the trace-log adapter, and the offline policy
-compiler. Each has a seam left open (see [`DESIGN.md`](./DESIGN.md) §9, §13) so
-it is additive, not a rewrite. APIs are stabilizing but may still shift before
-v1.0.
+The v0.2.0 ship boundary called out four seams left open — the HTTP service,
+real-key signing, the trace-log adapter, and the offline policy compiler. The first
+three shipped in v0.3.0 (above); the offline compiler remains deferred (see
+[Roadmap](#roadmap) and [`DESIGN.md`](./DESIGN.md) §9). APIs are stabilizing but may
+still shift before v1.0.

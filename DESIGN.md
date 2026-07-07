@@ -340,7 +340,7 @@ in-memory review queue · a demo agent exercising the marketing + refund scenari
 - **Standalone HTTP gate service** — the `check()` boundary is already a pure
   request/response; lifting it behind FastAPI is mechanical.
 - **Offline policy compiler** (SOP text → rule pack via an LLM, human-approved).
-  Bylaw's "compile → approve → enforce" lifecycle. Our runtime never needs it;
+  A "compile → approve → enforce" authoring lifecycle. Our runtime never needs it;
   it's an authoring convenience.
 - **Trace ingestion** (LangSmith/Langfuse/OpenAI logs → candidate rules).
 - **Cryptographic signing** with real keys (we start with a hash chain; HMAC/asym

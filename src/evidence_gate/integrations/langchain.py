@@ -4,7 +4,7 @@ A callback handler that watches the tools a LangChain agent runs, collects the
 evidence-bearing ones, and — the moment the agent is about to run a *sensitive*
 tool — routes that call through the evidence gate. On BLOCK/REVIEW it raises before
 the tool executes; on ALLOW/RESTRICT it steps out of the way. This is the runtime
-enforcement point Bylaw's `BylawCallbackHandler` occupies, kept on our own surface.
+enforcement point in the callback lifecycle, kept on our own surface.
 
 The handler is transport-agnostic via a small `GatePort` seam: it works against an
 in-process `Gate` (`LocalGatePort`) or the fail-closed remote client

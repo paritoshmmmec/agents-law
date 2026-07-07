@@ -1,4 +1,4 @@
-"""HTTP gate service — the "Vault" (COMPARISON.md §6 #1).
+"""HTTP gate service — a FastAPI wrapper over Gate.check() (COMPARISON.md §6 #1).
 
 A FastAPI wrapper over an existing `Gate`. It adds *no* evaluation logic: every
 request converges on the same validated `EvidenceManifest` and the same pure

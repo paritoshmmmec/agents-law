@@ -2,9 +2,9 @@
 
 `RemoteGate` is a thin, **fail-closed** client of the gate service (service.py).
 It keeps our own surface — `.check` / `.enforce` / `.auto_instrument` mirror the
-in-process `Gate` — and borrows only the good ideas from Bylaw's SDK: wrap
-existing tools by name pattern, refuse to execute if the gate is unreachable, and
-carry a signed clearance token back.
+in-process `Gate` — and adds the ergonomics that make remote enforcement painless:
+wrap existing tools by name pattern, refuse to execute if the gate is unreachable,
+and carry a signed clearance token back.
 
 Control-flow contract, identical to the in-process decorator (gate.py):
 
@@ -187,7 +187,7 @@ class RemoteGate:
         The wrapper reads its evidence from a `manifest=` / `tool_calls=` kwarg and
         derives `request_id` from a `request_id=` kwarg (falling back to the tool
         name), so existing call sites gate transparently once the kwargs are
-        supplied — matching Bylaw's zero-touch instrumentation ergonomics.
+        supplied — zero-touch instrumentation with no per-call-site rewrite.
         """
         items = target.items() if isinstance(target, dict) else vars(target).items()
         for name, obj in list(items):

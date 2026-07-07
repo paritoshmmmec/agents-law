@@ -11,3 +11,6 @@ wheels/
 .env
 .idea/*
 COMPARISON.md
+
+# Local session transcripts (YYYY-MM-DD-*.txt)
+20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]-*.txt
