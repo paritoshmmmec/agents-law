@@ -21,7 +21,8 @@ Two pieces, both plumbing over what already exists:
 from __future__ import annotations
 
 import fnmatch
-from datetime import datetime
+import json
+from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -43,6 +44,38 @@ class TraceMapping(BaseModel):
     observed_at: str
     args: str | None = None
     result: str | None = None
+
+
+# --- Per-vendor presets ----------------------------------------------------
+# The generic mapper already carries every vendor; these are the field paths
+# for the three formats people actually export, so callers don't have to look
+# them up. Each assumes one record == one tool call, already flattened to the
+# vendor's per-observation shape (LangSmith Run / Langfuse Observation / one
+# OpenAI tool_call). normalize() handles the format quirks each implies —
+# epoch-second timestamps and JSON-string args/result — with no vendor code.
+
+#: LangSmith `Run` objects with ``run_type="tool"`` (inputs/outputs are dicts,
+#: ``start_time`` an ISO8601 string). Filter to tool runs before normalizing.
+LANGSMITH = TraceMapping(
+    tool="name", call_id="id", observed_at="start_time", args="inputs", result="outputs"
+)
+
+#: Langfuse ``Observation`` objects (``type="SPAN"``). The public read API often
+#: returns ``input``/``output`` as JSON *strings* (unless ``parseIoAsJson`` is
+#: set); normalize() JSON-decodes them transparently.
+LANGFUSE = TraceMapping(
+    tool="name", call_id="id", observed_at="startTime", args="input", result="output"
+)
+
+#: One OpenAI chat-completion ``tool_calls[]`` entry, flattened with the parent
+#: completion's ``created`` (epoch seconds) alongside it —
+#: ``{**tool_call, "created": completion.created}``. ``function.arguments`` is a
+#: JSON string, which normalize() decodes. The tool *result* is not on the
+#: completion (it arrives in a later ``role="tool"`` message), so ``result`` is
+#: left unmapped; attach it from that message if you have it.
+OPENAI = TraceMapping(
+    tool="function.name", call_id="id", observed_at="created", args="function.arguments"
+)
 
 
 class NormalizeResult(BaseModel):
@@ -76,6 +109,53 @@ def _resolve(record: dict[str, Any], path: str) -> Any:
     return cur
 
 
+def _parse_timestamp(raw: Any) -> datetime:
+    """Coerce a trace timestamp to a datetime, or raise ValueError.
+
+    Accepts a `datetime`, an ISO8601 string (LangSmith/Langfuse), or an
+    int/float of Unix **seconds** (OpenAI's `created`). Epoch values are read as
+    UTC so replay stays reproducible regardless of the host timezone.
+    """
+    if isinstance(raw, datetime):
+        return raw
+    if isinstance(raw, bool):  # bool is an int subclass — never a timestamp
+        raise ValueError(f"not a timestamp: {raw!r}")
+    if isinstance(raw, (int, float)):
+        return datetime.fromtimestamp(raw, timezone.utc)
+    return datetime.fromisoformat(str(raw))
+
+
+def _decode_dict(raw: Any) -> dict[str, Any]:
+    """Best-effort coerce an args value to a dict; {} if it isn't one.
+
+    Vendors differ: LangSmith hands back a dict, OpenAI a JSON string
+    (`function.arguments`), Langfuse either depending on `parseIoAsJson`. A
+    string is JSON-decoded; anything that isn't a dict after that contributes
+    no args (evidence stays opt-in — we never invent structure).
+    """
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _decode_result(raw: Any) -> Any:
+    """Like `_decode_dict` for results, but preserve non-dict payloads.
+
+    A result may legitimately be a scalar or list; only *JSON strings* are
+    decoded (so a Langfuse `output` string becomes the object an extractor
+    expects). A plain string that isn't JSON is passed through unchanged.
+    """
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except (ValueError, TypeError):
+            return raw
+    return raw
+
+
 def normalize(records: list[dict[str, Any]], mapping: TraceMapping) -> NormalizeResult:
     """Map raw trace records into `ToolCall`s via `mapping`.
 
@@ -98,8 +178,8 @@ def normalize(records: list[dict[str, Any]], mapping: TraceMapping) -> Normalize
             continue
 
         try:
-            observed_at = observed_raw if isinstance(observed_raw, datetime) else datetime.fromisoformat(str(observed_raw))
-        except ValueError:
+            observed_at = _parse_timestamp(observed_raw)
+        except (ValueError, OSError, OverflowError):
             result.skipped.append(f"record[{i}]: unparseable observed_at {observed_raw!r}")
             continue
 
@@ -108,8 +188,8 @@ def normalize(records: list[dict[str, Any]], mapping: TraceMapping) -> Normalize
         result.calls.append(
             ToolCall(
                 tool=str(tool),
-                args=args if args is not _MISSING and isinstance(args, dict) else {},
-                result=None if res is _MISSING else res,
+                args={} if args is _MISSING else _decode_dict(args),
+                result=None if res is _MISSING else _decode_result(res),
                 call_id=str(call_id),
                 observed_at=observed_at,
             )

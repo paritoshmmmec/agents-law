@@ -19,8 +19,17 @@ from evidence_gate.schemas import (
     RuleResult,
 )
 from evidence_gate.signing import Signer, TokenExpired, TokenInvalid, Verifier
+from evidence_gate.telemetry import (
+    DecisionEvent,
+    NullSink,
+    OTelSink,
+    TelemetrySink,
+)
 from evidence_gate.trace import Extractor, ManifestBuilder, ToolCall
 from evidence_gate.trace_adapters import (
+    LANGFUSE,
+    LANGSMITH,
+    OPENAI,
     NormalizeResult,
     SimReport,
     TraceMapping,
@@ -33,6 +42,7 @@ __all__ = [
     "AuditLog",
     "Comparison",
     "Decision",
+    "DecisionEvent",
     "Effect",
     "EvidenceItem",
     "EvidenceManifest",
@@ -41,14 +51,20 @@ __all__ = [
     "Gate",
     "GateResult",
     "InMemoryReviewQueue",
+    "LANGFUSE",
+    "LANGSMITH",
     "ManifestBuilder",
     "NormalizeResult",
+    "NullSink",
+    "OPENAI",
+    "OTelSink",
     "PolicySet",
     "ProposedAction",
     "ReviewQueue",
     "RuleResult",
     "SimReport",
     "Signer",
+    "TelemetrySink",
     "TokenExpired",
     "TokenInvalid",
     "ToolCall",
@@ -79,21 +95,35 @@ try:  # pragma: no cover - exercised via the extras
 except ImportError:  # fastapi not installed (service extra absent)
     pass
 
-try:  # pragma: no cover - exercised via the extras
-    from evidence_gate.integrations.langchain import (
-        EvidenceGateCallbackHandler,
-        GatePort,
-        GateVerdict,
-        LocalGatePort,
-        RemoteGatePort,
-    )
+# The framework-neutral GatePort seam lives in integrations.base and depends
+# only on the core + client, so it is always importable.
+from evidence_gate.integrations.base import (  # noqa: E402
+    GatePort,
+    GateSession,
+    GateVerdict,
+    LocalGatePort,
+    RemoteGatePort,
+)
 
-    __all__ += [
-        "EvidenceGateCallbackHandler",
-        "GatePort",
-        "GateVerdict",
-        "LocalGatePort",
-        "RemoteGatePort",
-    ]
+__all__ += ["GatePort", "GateSession", "GateVerdict", "LocalGatePort", "RemoteGatePort"]
+
+try:  # pragma: no cover - exercised via the extras
+    from evidence_gate.integrations.langchain import EvidenceGateCallbackHandler
+
+    __all__ += ["EvidenceGateCallbackHandler"]
 except ImportError:  # langchain-core not installed (langchain extra absent)
+    pass
+
+try:  # pragma: no cover - exercised via the extras
+    from evidence_gate.integrations.crewai import gate_crew_tools
+
+    __all__ += ["gate_crew_tools"]
+except ImportError:  # crewai not installed (crewai extra absent)
+    pass
+
+try:  # pragma: no cover - exercised via the extras
+    from evidence_gate.integrations.llamaindex import gate_llama_tools
+
+    __all__ += ["gate_llama_tools"]
+except ImportError:  # llama-index-core not installed (llamaindex extra absent)
     pass

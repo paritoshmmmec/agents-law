@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 from evidence_gate import (
+    LANGFUSE,
+    LANGSMITH,
+    OPENAI,
     EvidenceItem,
     EvidenceSource,
     Gate,
@@ -92,6 +96,71 @@ def test_normalize_skips_unparseable_timestamp():
     result = normalize(records, mapping)
     assert result.calls == []
     assert "unparseable observed_at" in result.skipped[0]
+
+
+# --- vendor presets --------------------------------------------------------
+def test_langsmith_preset():
+    # A LangSmith Run (run_type="tool"): dict inputs/outputs, ISO8601 start_time.
+    run = {
+        "id": "run-1",
+        "name": "get_optin",
+        "run_type": "tool",
+        "start_time": NOW.isoformat(),
+        "inputs": {"contact_id": 42},
+        "outputs": {"found": True, "value": True},
+    }
+    result = normalize([run], LANGSMITH)
+    assert result.skipped == []
+    call = result.calls[0]
+    assert call.tool == "get_optin"
+    assert call.call_id == "run-1"
+    assert call.args == {"contact_id": 42}
+    assert call.result == {"found": True, "value": True}
+    assert call.observed_at == NOW
+
+
+def test_langfuse_preset_decodes_json_string_io():
+    # Langfuse read API returns input/output as JSON *strings* by default.
+    obs = {
+        "id": "obs-1",
+        "type": "SPAN",
+        "name": "get_optin",
+        "startTime": NOW.isoformat(),
+        "input": json.dumps({"contact_id": 42}),
+        "output": json.dumps({"found": True, "value": True}),
+    }
+    result = normalize([obs], LANGFUSE)
+    assert result.skipped == []
+    call = result.calls[0]
+    assert call.args == {"contact_id": 42}  # decoded from the JSON string
+    assert call.result == {"found": True, "value": True}
+
+
+def test_openai_preset_epoch_and_json_arguments():
+    # One tool_call flattened with the completion's `created` (epoch seconds).
+    tool_call = {
+        "id": "call-1",
+        "created": int(NOW.timestamp()),
+        "function": {"name": "get_optin", "arguments": json.dumps({"contact_id": 42})},
+    }
+    result = normalize([tool_call], OPENAI)
+    assert result.skipped == []
+    call = result.calls[0]
+    assert call.tool == "get_optin"
+    assert call.call_id == "call-1"
+    assert call.args == {"contact_id": 42}  # decoded from the JSON string
+    assert call.observed_at == NOW  # epoch seconds read as UTC
+    assert call.result is None  # result arrives in a later role="tool" message
+
+
+def test_malformed_json_arguments_contribute_no_args_not_crash():
+    tool_call = {
+        "id": "call-2",
+        "created": int(NOW.timestamp()),
+        "function": {"name": "get_optin", "arguments": "{not valid json"},
+    }
+    result = normalize([tool_call], OPENAI)
+    assert result.calls[0].args == {}  # opt-in evidence: never invented
 
 
 # --- simulate --------------------------------------------------------------

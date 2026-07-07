@@ -28,23 +28,17 @@ from typing import Any, Callable
 
 import httpx
 
+from evidence_gate.errors import ClearanceDenied, GateUnreachable
 from evidence_gate.schemas import Decision, Effect, EvidenceManifest, ProposedAction
 from evidence_gate.trace import ToolCall
 from evidence_gate.signing import Verifier
 
-
-class ClearanceDenied(Exception):
-    """Raised when the gate BLOCKs an action. Mirrors gate.ActionBlocked."""
-
-    def __init__(self, decision: Decision, reason: str, request_id: str) -> None:
-        self.decision = decision
-        self.reason = reason
-        self.request_id = request_id
-        super().__init__(f"clearance denied ({request_id}): {reason}")
-
-
-class GateUnreachable(Exception):
-    """The gate service could not be reached / returned an error. Fail closed."""
+__all__ = [
+    "ClearanceDenied",
+    "GateUnreachable",
+    "RemoteGate",
+    "RemoteResult",
+]
 
 
 class RemoteResult:
