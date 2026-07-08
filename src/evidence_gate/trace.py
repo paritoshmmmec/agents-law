@@ -58,6 +58,11 @@ class ManifestBuilder:
         self._extractors[tool] = extractor
         return self
 
+    @property
+    def registered_tools(self) -> frozenset[str]:
+        """Tool names with an evidence extractor — the recognized-evidence surface."""
+        return frozenset(self._extractors)
+
     def build(self, calls: list[ToolCall], compiled_at: datetime) -> EvidenceManifest:
         """Derive a manifest from a trace. Deterministic in `calls` order."""
         items: list[EvidenceItem] = []

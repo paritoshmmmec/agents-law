@@ -1,6 +1,6 @@
 [project]
 name = "evidence-gate"
-version = "0.2.0"
+version = "0.4.1"
 description = "A deterministic runtime enforcement gate that checks an agent's evidence before a state-changing action executes."
 readme = "README.md"
 authors = [
@@ -14,12 +14,41 @@ dependencies = [
     "pyyaml>=6.0.3",
 ]
 
+[project.scripts]
+evidence-gate = "evidence_gate.cli:main"
+
+[project.optional-dependencies]
+service = [
+    "fastapi>=0.115",
+    "uvicorn>=0.32",
+]
+client = [
+    "httpx>=0.28",
+]
+langchain = [
+    "langchain-core>=0.3",
+]
+crewai = [
+    "crewai>=0.100.0",
+]
+llamaindex = [
+    "llama-index-core>=0.10.20",
+]
+otel = [
+    "opentelemetry-api>=1.20",
+]
+
 [build-system]
 requires = ["uv_build>=0.10.10,<0.11.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "fastapi>=0.115",
+    "httpx>=0.28",
+    "langchain-core>=0.3",
+    "crewai>=0.100.0",
+    "llama-index-core>=0.10.20",
     "pytest>=9.1.1",
 ]
 

@@ -9,3 +9,9 @@ wheels/
 # Virtual environments
 .venv
 .env
+.idea/*
+COMPARISON.md
+
+# Local session transcripts (YYYY-MM-DD-*.txt)
+20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]-*.txt
+docs/Evidence_Gate_Remaining_Work.md

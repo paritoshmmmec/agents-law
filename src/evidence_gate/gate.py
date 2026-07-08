@@ -31,6 +31,7 @@ from evidence_gate.schemas import (
     ProposedAction,
     RuleResult,
 )
+from evidence_gate.telemetry import DecisionEvent, NullSink, TelemetrySink
 
 
 class ActionBlocked(Exception):
@@ -69,10 +70,14 @@ class Gate:
         policy_set: PolicySet,
         audit: AuditLog | None = None,
         review: ReviewQueue | None = None,
+        telemetry: TelemetrySink | None = None,
     ) -> None:
         self.policies = policy_set
         self.audit = audit if audit is not None else AuditLog()
         self.review = review if review is not None else InMemoryReviewQueue()
+        # Off by default (NullSink discards). Pass an OTelSink to emit hygienic
+        # span events; telemetry never affects the verdict or the audit trail.
+        self.telemetry = telemetry if telemetry is not None else NullSink()
 
     def check(
         self,
@@ -92,6 +97,7 @@ class Gate:
             )
             empty = EvidenceManifest(items=[], compiled_at=now)
             self.audit.append(action, empty, decision, now)
+            self._emit(action, empty, decision, None, now)
             return GateResult(decision)
 
         # 2. Deterministic evaluation.
@@ -108,7 +114,23 @@ class Gate:
         if decision.effect == Effect.REVIEW:
             ticket = self.review.enqueue(decision, action, manifest)
 
+        # 5. Telemetry — a hygienic span event, after audit + routing so the
+        #    ticket is known. Emitted through a sink that never touches the
+        #    verdict; a failing sink must not fail the check.
+        self._emit(action, manifest, decision, ticket, now)
+
         return GateResult(decision, review_ticket=ticket)
+
+    def _emit(
+        self,
+        action: ProposedAction,
+        manifest: EvidenceManifest,
+        decision: Decision,
+        ticket: str | None,
+        now: datetime,
+    ) -> None:
+        event = DecisionEvent.from_decision(action, manifest, decision, review_ticket=ticket)
+        self.telemetry.emit(event, emitted_at=now)
 
     def resolve_review(
         self,

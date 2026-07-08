@@ -9,14 +9,14 @@ gives us a tamper-evident ("signed") trail without key management yet. Swapping
 
 from __future__ import annotations
 
-import hashlib
 import json
 from datetime import datetime
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 from evidence_gate.schemas import Decision, EvidenceManifest, ProposedAction
+from evidence_gate.signing import Signer
 
 GENESIS_HASH = "0" * 64
 
@@ -41,22 +41,28 @@ class AuditRecord(BaseModel):
         return json.dumps(data, sort_keys=True, separators=(",", ":"))
 
 
-def _hash(prev_hash: str, record: AuditRecord) -> str:
-    digest = hashlib.sha256()
-    digest.update(prev_hash.encode())
-    digest.update(record.payload_for_hash().encode())
-    return digest.hexdigest()
-
-
 class AuditLog(BaseModel):
     """In-memory hash-chained log with optional append to a JSONL file.
 
     Kept simple on purpose: the invariant that matters is that each record's
     `hash` binds its content to the previous record's `hash`.
+
+    A `Signer` supplies the chain hash. The default is an *unsigned* signer, so
+    the chain is byte-identical to a plain `sha256(prev + payload)` — passing a
+    keyed `Signer` upgrades the trail to a keyed (HMAC) one with no other change.
     """
 
     records: list[AuditRecord] = Field(default_factory=list)
     path: Path | None = None
+    _signer: Signer = PrivateAttr(default_factory=Signer)
+
+    def __init__(self, path: Path | None = None, *, signer: Signer | None = None, **data) -> None:
+        super().__init__(path=path, **data)
+        if signer is not None:
+            self._signer = signer
+
+    def _hash(self, prev_hash: str, record: AuditRecord) -> str:
+        return self._signer.chain_hash(prev_hash, record.payload_for_hash())
 
     def append(
         self,
@@ -78,7 +84,7 @@ class AuditLog(BaseModel):
             recorded_at=now,
             prev_hash=prev_hash,
         )
-        record.hash = _hash(prev_hash, record)
+        record.hash = self._hash(prev_hash, record)
         self.records.append(record)
         if self.path is not None:
             with self.path.open("a") as fh:
@@ -91,7 +97,7 @@ class AuditLog(BaseModel):
         for record in self.records:
             if record.prev_hash != prev_hash:
                 return False
-            if record.hash != _hash(prev_hash, record):
+            if record.hash != self._hash(prev_hash, record):
                 return False
             prev_hash = record.hash
         return True
