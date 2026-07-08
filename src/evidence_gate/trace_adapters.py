@@ -96,6 +96,28 @@ class SimReport(BaseModel):
     review_ticket: str | None = None
 
 
+class CoverageReport(BaseModel):
+    """Which tools in a trace the operator has actually accounted for.
+
+    A tool in the trace is one of three things, and *unclassified* is the one that
+    matters (vision §5.6 "coverage gaps"): a tool that matches no action pattern
+    **and** has no evidence extractor is a path the operator has said nothing about
+    — potentially a sensitive action reached through an unwrapped route. Surfacing
+    it by name is the whole point; a silent miss reads as "covered" when it isn't.
+
+    Counts are per distinct tool *name* (not per call), sorted for reproducibility.
+    """
+
+    gated: list[str] = Field(default_factory=list)  # tools matched to an action
+    recognized_evidence: list[str] = Field(default_factory=list)  # have an extractor
+    unclassified: list[str] = Field(default_factory=list)  # neither — residual risk
+    call_counts: dict[str, int] = Field(default_factory=dict)  # tool -> #calls in trace
+
+    @property
+    def has_residual_risk(self) -> bool:
+        return bool(self.unclassified)
+
+
 _MISSING = object()
 
 
@@ -253,3 +275,41 @@ def simulate(
         )
         evidence = []  # turn boundary: this action's evidence is consumed
     return reports
+
+
+def coverage(
+    calls: list[ToolCall],
+    *,
+    action_mapping: dict[str, str],
+    builder: ManifestBuilder | None = None,
+) -> CoverageReport:
+    """Classify every distinct tool in `calls` as gated / recognized-evidence / unclassified.
+
+    Pure and side-effect-free — it runs no gate check, just the same
+    `action_mapping` glob (`simulate`'s classifier) and the builder's registered
+    extractors. A tool that matches neither is *unclassified*: a route the operator
+    hasn't accounted for, surfaced by name rather than silently missed.
+
+    `builder=None` means no extractors are registered, so only gated tools are
+    recognized and everything else is residual risk — the honest default before any
+    extractor is wired.
+    """
+    known_evidence = builder.registered_tools if builder is not None else frozenset()
+    gated: set[str] = set()
+    recognized: set[str] = set()
+    unclassified: set[str] = set()
+    counts: dict[str, int] = {}
+    for call in calls:
+        counts[call.tool] = counts.get(call.tool, 0) + 1
+        if _match_action(call.tool, action_mapping) is not None:
+            gated.add(call.tool)
+        elif call.tool in known_evidence:
+            recognized.add(call.tool)
+        else:
+            unclassified.add(call.tool)
+    return CoverageReport(
+        gated=sorted(gated),
+        recognized_evidence=sorted(recognized),
+        unclassified=sorted(unclassified),
+        call_counts=counts,
+    )

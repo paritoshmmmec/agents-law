@@ -1,6 +1,6 @@
 [project]
 name = "evidence-gate"
-version = "0.3.0"
+version = "0.4.1"
 description = "A deterministic runtime enforcement gate that checks an agent's evidence before a state-changing action executes."
 readme = "README.md"
 authors = [
@@ -13,6 +13,9 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "pyyaml>=6.0.3",
 ]
+
+[project.scripts]
+evidence-gate = "evidence_gate.cli:main"
 
 [project.optional-dependencies]
 service = [

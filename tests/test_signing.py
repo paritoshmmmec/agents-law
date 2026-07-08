@@ -7,7 +7,14 @@ from datetime import timedelta
 
 import pytest
 
-from evidence_gate.signing import Signer, TokenExpired, TokenInvalid, Verifier
+from evidence_gate.signing import (
+    ClearanceRequired,
+    Signer,
+    TokenExpired,
+    TokenInvalid,
+    Verifier,
+    require_clearance,
+)
 
 KEY = b"unit-test-key"
 
@@ -71,3 +78,60 @@ def test_malformed_token_fails(now):
 def test_unkeyed_signer_cannot_issue(now):
     with pytest.raises(ValueError):
         Signer().issue({"request_id": "r1"}, ttl_seconds=300, now=now)
+
+
+# --- require_clearance: the downstream guard -------------------------------
+ACTION = "billing.issue_refund"
+
+
+def _refund(clock):
+    """A downstream effect guarded by clearance, with an injected clock."""
+
+    @require_clearance(Verifier(KEY), action=ACTION, now=lambda: clock)
+    def execute_refund(amount):  # token is consumed by the guard, not forwarded here
+        return amount
+
+    return execute_refund
+
+
+def _token(now, *, action=ACTION, ttl=300):
+    return Signer(KEY).issue(
+        {"request_id": "r1", "action": action, "effect": "allow"}, ttl_seconds=ttl, now=now
+    )
+
+
+def test_require_clearance_runs_with_valid_token(now):
+    assert _refund(now)(100, clearance_token=_token(now)) == 100
+
+
+def test_require_clearance_refuses_missing_token(now):
+    with pytest.raises(ClearanceRequired, match="missing clearance token"):
+        _refund(now)(100)
+
+
+def test_require_clearance_refuses_forged_token(now):
+    forged = Signer(b"wrong-key").issue({"action": ACTION}, ttl_seconds=300, now=now)
+    with pytest.raises(ClearanceRequired, match="invalid clearance token"):
+        _refund(now)(100, clearance_token=forged)
+
+
+def test_require_clearance_refuses_expired_token(now):
+    later = now + timedelta(seconds=600)  # clock is past the 300s ttl
+    with pytest.raises(ClearanceRequired, match="expired"):
+        _refund(later)(100, clearance_token=_token(now, ttl=300))
+
+
+def test_require_clearance_binds_action(now):
+    # A token minted for a different action must not clear this one.
+    other = _token(now, action="billing.wire_transfer")
+    with pytest.raises(ClearanceRequired, match="not 'billing.issue_refund'"):
+        _refund(now)(100, clearance_token=other)
+
+
+def test_require_clearance_does_not_forward_token(now):
+    # The guard pops the token; the wrapped fn's signature stays clean.
+    @require_clearance(Verifier(KEY), now=lambda: now)
+    def strict(amount):  # no **kwargs — would TypeError if token leaked through
+        return amount
+
+    assert strict(5, clearance_token=_token(now)) == 5

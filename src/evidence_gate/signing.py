@@ -24,10 +24,13 @@ engine holds (engine.py §5.5).
 from __future__ import annotations
 
 import base64
+import functools
 import hashlib
 import hmac
 import json
+from collections.abc import Callable
 from datetime import datetime, timezone
+from typing import Any
 
 
 class TokenInvalid(Exception):
@@ -36,6 +39,18 @@ class TokenInvalid(Exception):
 
 class TokenExpired(Exception):
     """Token signature is valid but its `exp` is in the past relative to `now`."""
+
+
+class ClearanceRequired(Exception):
+    """A downstream call was refused because it carried no valid clearance token.
+
+    The umbrella a downstream service catches to fail closed: raised for a missing,
+    malformed, expired, or wrong-action token alike, with `.reason` explaining which.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 def _b64u_encode(raw: bytes) -> str:
@@ -107,3 +122,56 @@ class Verifier:
         if exp is not None and now.timestamp() > exp:
             raise TokenExpired(f"token expired at {datetime.fromtimestamp(exp, timezone.utc).isoformat()}")
         return claims
+
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def require_clearance(
+    verifier: Verifier,
+    *,
+    action: str | None = None,
+    token_arg: str = "clearance_token",
+    now: Callable[[], datetime] = _now_utc,
+) -> Callable:
+    """Guard a downstream tool so it refuses any call lacking a valid clearance token.
+
+    This is what makes the gate *load-bearing* downstream: an ALLOW/RESTRICT mints a
+    short-lived signed token (`Signer.issue`), and a service that actually executes
+    the consequential effect wraps its entrypoint in this guard. A call with no
+    token, a forged/expired token, or a token minted for a *different* action is
+    refused with `ClearanceRequired` — the effect never runs. Fail-closed by
+    construction: the default is deny, and only a fresh valid token opens it.
+
+        @require_clearance(verifier, action="billing.issue_refund")
+        def execute_refund(amount, *, clearance_token):
+            ...  # runs only when the token verifies for this action
+
+    The token is read from the `token_arg` keyword (default ``clearance_token``) and
+    is *not* forwarded to the wrapped function, so existing signatures stay clean.
+    Binding `action` rejects a token good for some other action — a refund token
+    can't clear a wire transfer. `now` is injectable for reproducible tests.
+    """
+
+    def decorator(fn: Callable) -> Callable:
+        @functools.wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            token = kwargs.pop(token_arg, None)
+            if not token:
+                raise ClearanceRequired(f"missing clearance token (expected keyword {token_arg!r})")
+            try:
+                claims = verifier.verify(token, now=now())
+            except TokenExpired as exc:
+                raise ClearanceRequired(f"clearance token expired: {exc}") from exc
+            except TokenInvalid as exc:
+                raise ClearanceRequired(f"invalid clearance token: {exc}") from exc
+            if action is not None and claims.get("action") != action:
+                raise ClearanceRequired(
+                    f"clearance token is for action {claims.get('action')!r}, not {action!r}"
+                )
+            return fn(*args, **kwargs)
+
+        return wrapper
+
+    return decorator

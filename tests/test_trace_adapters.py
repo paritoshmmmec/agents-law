@@ -15,6 +15,7 @@ from evidence_gate import (
     ManifestBuilder,
     PolicySet,
     TraceMapping,
+    coverage,
     normalize,
     simulate,
 )
@@ -218,3 +219,36 @@ def test_simulate_deterministic_in_order():
     first = _run(calls)
     again = _run(calls)
     assert [r.model_dump() for r in first] == [r.model_dump() for r in again]
+
+
+# --- coverage --------------------------------------------------------------
+def test_coverage_classifies_each_tool():
+    # get_optin -> extractor (recognized evidence); send_marketing -> action (gated).
+    calls = _trace(42, 60, True)
+    cov = coverage(calls, action_mapping={"send_*": ACTION}, builder=_builder())
+    assert cov.gated == ["send_marketing"]
+    assert cov.recognized_evidence == ["get_optin"]
+    assert cov.unclassified == []
+    assert cov.has_residual_risk is False
+    assert cov.call_counts == {"get_optin": 1, "send_marketing": 1}
+
+
+def test_coverage_surfaces_unclassified_tool():
+    # An unwrapped, unrecognized tool is residual risk — named, never silently dropped.
+    calls = _trace(42, 60, True) + [
+        ToolCall(tool="wire_transfer", args={"amount": 9000}, call_id="w1", observed_at=NOW),
+        ToolCall(tool="wire_transfer", args={"amount": 10}, call_id="w2", observed_at=NOW),
+    ]
+    cov = coverage(calls, action_mapping={"send_*": ACTION}, builder=_builder())
+    assert cov.unclassified == ["wire_transfer"]
+    assert cov.has_residual_risk is True
+    assert cov.call_counts["wire_transfer"] == 2
+
+
+def test_coverage_without_builder_treats_evidence_tools_as_residual():
+    # No extractors registered: only gated tools are recognized, the rest is residual.
+    calls = _trace(42, 60, True)
+    cov = coverage(calls, action_mapping={"send_*": ACTION})
+    assert cov.gated == ["send_marketing"]
+    assert cov.recognized_evidence == []
+    assert cov.unclassified == ["get_optin"]

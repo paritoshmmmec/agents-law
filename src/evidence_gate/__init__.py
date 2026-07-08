@@ -18,7 +18,14 @@ from evidence_gate.schemas import (
     ProposedAction,
     RuleResult,
 )
-from evidence_gate.signing import Signer, TokenExpired, TokenInvalid, Verifier
+from evidence_gate.signing import (
+    ClearanceRequired,
+    Signer,
+    TokenExpired,
+    TokenInvalid,
+    Verifier,
+    require_clearance,
+)
 from evidence_gate.telemetry import (
     DecisionEvent,
     NullSink,
@@ -30,9 +37,11 @@ from evidence_gate.trace_adapters import (
     LANGFUSE,
     LANGSMITH,
     OPENAI,
+    CoverageReport,
     NormalizeResult,
     SimReport,
     TraceMapping,
+    coverage,
     normalize,
     simulate,
 )
@@ -40,7 +49,9 @@ from evidence_gate.trace_adapters import (
 __all__ = [
     "ActionBlocked",
     "AuditLog",
+    "ClearanceRequired",
     "Comparison",
+    "CoverageReport",
     "Decision",
     "DecisionEvent",
     "Effect",
@@ -70,7 +81,9 @@ __all__ = [
     "ToolCall",
     "TraceMapping",
     "Verifier",
+    "coverage",
     "normalize",
+    "require_clearance",
     "simulate",
 ]
 

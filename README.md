@@ -2,12 +2,16 @@
 
 ![Evidence Gate — deterministic runtime enforcement for agent tool calls](./assets/banner.svg)
 
-> **Status: alpha (v0.3.0).** The core gate, engine, audit chain, cross-key
+> **Status: alpha (v0.4.1).** The core gate, engine, audit chain, cross-key
 > `compare` rules, a real RESTRICT degradation path, and a live LLM agent work
-> today — and v0.3 adds the **integration surface**: a remote HTTP gate service, a
+> today; v0.3 added the **integration surface** (remote HTTP gate service,
 > fail-closed client with name-pattern instrumentation, HMAC-signed clearance
-> tokens, a Trace-to-Gate replay tool, and a LangChain callback adapter (see
-> [Roadmap](#roadmap)). APIs are stabilizing but may still shift before v1.0.
+> tokens, Trace-to-Gate replay, LangChain adapter); v0.4 rounded it out with
+> **per-vendor trace presets** (LangSmith / Langfuse / OpenAI), **CrewAI and
+> LlamaIndex adapters**, and **hygienic OTel decision telemetry**; and v0.4.1 adds
+> the **adoption CLI** (`evidence-gate replay` / `audit verify`), a **residual-risk
+> coverage report**, and **downstream token enforcement** (`require_clearance`) —
+> see [Roadmap](#roadmap). APIs are stabilizing but may still shift before v1.0.
 
 A deterministic runtime enforcement layer that forces an agent to prove its
 reasoning against ground-truth evidence **before** a state-changing action is
@@ -35,7 +39,7 @@ paths converge on the *same* deterministic engine; no LLM ever runs inside it.
 flowchart TB
     subgraph agent["Agent runtime"]
         LLM["LLM / tool loop"]
-        LC["LangChain callback<br/>(EvidenceGateCallbackHandler)"]
+        LC["Framework adapter<br/>(LangChain / CrewAI / LlamaIndex)"]
         LLM -. evidence tools .-> LC
     end
 
@@ -65,6 +69,7 @@ flowchart TB
         AUDIT[("Hash-chained<br/>audit log")]
         REVIEW[("Review queue<br/>non-blocking")]
         TOKEN["Signed clearance token<br/>(HMAC, ALLOW/RESTRICT)"]
+        OTEL["OTel span event<br/>(payload-safe, opt-in)"]
     end
 
     LC --> INPROC
@@ -79,6 +84,7 @@ flowchart TB
 
     ENGINE --> VERDICT
     GATE --> AUDIT
+    GATE -. telemetry sink .-> OTEL
     VERDICT -->|REVIEW| REVIEW
     VERDICT -->|ALLOW / RESTRICT| TOKEN
 
@@ -95,7 +101,7 @@ the audit record is appended before `check()` returns.
 uv sync                         # install core deps into .venv
 uv run examples/demo_agent.py   # marketing tripwire: the four failure modes
 uv run examples/refund_agent.py # refund tripwire: cross-key compare + RESTRICT
-uv run pytest                   # 89 tests: failure modes, determinism, audit, remote, adapters
+uv run pytest                   # 127 tests: failure modes, determinism, audit, remote, adapters, telemetry, cli
 ```
 
 The core gate depends only on `pydantic` + `pyyaml`; `openai`/`python-dotenv` come
@@ -103,7 +109,8 @@ along for the live-LLM example. The remote gate and framework adapters are **opt
 extras**, so nothing that doesn't need FastAPI/httpx/LangChain pulls them in:
 
 ```bash
-uv sync --extra service --extra client --extra langchain   # everything
+uv sync --extra service --extra client --extra langchain \
+        --extra crewai --extra llamaindex --extra otel        # everything
 ```
 
 | Extra | Adds | Enables |
@@ -111,6 +118,9 @@ uv sync --extra service --extra client --extra langchain   # everything
 | `service` | `fastapi`, `uvicorn` | `create_app()` — the HTTP gate service |
 | `client`  | `httpx` | `RemoteGate` — the fail-closed remote client |
 | `langchain` | `langchain-core` | `EvidenceGateCallbackHandler` |
+| `crewai` | `crewai` | `gate_crew_tools()` — gated `BaseTool` wrappers |
+| `llamaindex` | `llama-index-core` | `gate_llama_tools()` — gated `FunctionTool` wrappers |
+| `otel` | `opentelemetry-api` | `OTelSink` — hygienic `evidence_gate.decision` span events |
 
 ## Running a real agent
 
@@ -234,6 +244,21 @@ token** (`Signer`/`Verifier`); the client verifies it on receipt. The same key
 signs the audit chain — with `key=None` the chain hash is byte-identical to the
 plain hash, so signing is a backwards-compatible drop-in.
 
+A downstream service that actually executes the effect can make that token
+**load-bearing** — refusing any call that doesn't carry a fresh, action-bound one:
+
+```python
+from evidence_gate import Verifier, require_clearance
+
+@require_clearance(Verifier(b"secret-key"), action="billing.issue_refund")
+def execute_refund(amount):          # the token is consumed by the guard, not forwarded
+    ledger.debit(amount)
+
+execute_refund(45, clearance_token=token)   # runs only if the token verifies for this action
+#   missing / forged / expired token -> raises ClearanceRequired (effect never runs)
+#   token minted for another action  -> raises ClearanceRequired
+```
+
 ## Trace-to-Gate (replay recorded traces)
 
 Point the gate at the tool-call log an agent *already* produced and see what it
@@ -251,14 +276,54 @@ reports = simulate(calls, gate=gate, builder=builder,
 
 `normalize` maps arbitrary vendor exports (dotted field paths) into the `ToolCall`
 shape; a record missing a required field is *skipped and surfaced*, never guessed.
+For the common vendors this is a one-liner — ship-ready `TraceMapping` presets
+cover their per-observation shapes:
+
+```python
+from evidence_gate import LANGSMITH, LANGFUSE, OPENAI, normalize
+
+calls = normalize(runs, LANGSMITH).calls        # or LANGFUSE, or OPENAI
+```
+
 `simulate` scopes evidence per turn and runs every sensitive call through the
 untouched `gate.check()`. See `examples/trace_replay.py`.
 
-## LangChain adapter
+## CLI (`evidence-gate`)
 
-A callback handler that collects the evidence tools an agent runs and gates the
-sensitive one before it executes — against an in-process `Gate` or the remote
-client, via the same handler.
+The same replay and audit-verify flows, from a shell — the Phase-1 onboarding
+surface, no Python required beyond an importable extractor module.
+
+```bash
+# Diagnose: what would the gate have decided on yesterday's trace?
+evidence-gate replay trace.json \
+  --policy policies --mapping langsmith \
+  --action 'send_*=marketing.send_sequence' \
+  --extractor 'get_optin=myapp.extractors:optin'
+#   s42  ALLOW  executed=true
+#   s99  BLOCK  executed=false — missing required evidence for 'marketing.opt_in'
+#   Coverage:  gated: send_marketing | ! UNCLASSIFIED: wire_transfer (x1)
+
+# Verify a hash-chained audit log written by AuditLog(path=...)
+evidence-gate audit verify audit.jsonl        # exit 0 = intact, 1 = tampered
+```
+
+`--mapping` takes a preset (`langsmith` / `langfuse` / `openai`) or a
+`TraceMapping` JSON file; `--extractor TOOL=module:function` registers an evidence
+extractor (uvicorn-style import). Every run prints a **coverage** section that
+names any *unclassified* tool — a call reached in the trace that no `--action` or
+`--extractor` accounts for — so residual risk is surfaced, never silently missed.
+`--now` injects the evaluation time for reproducible runs.
+
+## Framework adapters
+
+Three adapters share one seam — a `GatePort` (local or remote) plus a `GateSession`
+that accumulates evidence as tools run. Each gates the sensitive tool *in the
+agent's own call path*, so `BLOCK`/`REVIEW` raise `ClearanceDenied` before it
+executes; all three work against an in-process `Gate` or the remote client
+unchanged.
+
+**LangChain** — a callback handler that collects evidence tools and gates the
+sensitive one:
 
 ```python
 from evidence_gate import Gate, ManifestBuilder, PolicySet
@@ -269,8 +334,40 @@ handler = EvidenceGateCallbackHandler(port, action_mapping={"send_*": "marketing
 agent.invoke(..., config={"callbacks": [handler]})   # BLOCK/REVIEW raise before the tool runs
 ```
 
+**CrewAI / LlamaIndex** — both frameworks' event buses are observe-only (they
+can't stop a call), so these adapters wrap the tool itself and share a `GateSession`:
+
+```python
+from evidence_gate.integrations.base import GateSession, LocalGatePort
+from evidence_gate.integrations.crewai import gate_crew_tools        # or llamaindex.gate_llama_tools
+
+session = GateSession(LocalGatePort(gate, builder),
+                      action_mapping={"send_*": "marketing.send_sequence"}, now=now)
+tools = gate_crew_tools([get_optin, send_marketing], session)        # gated, drop-in replacements
+```
+
 See `examples/remote_agent.py`, `examples/trace_replay.py`, and
 `examples/langchain_agent.py` for each path end-to-end.
+
+## Decision telemetry (OTel, payload-safe)
+
+Every `check()` can emit one span event describing *what the gate decided* — never
+*what the agent was doing*. The event carries only non-sensitive scalars (action
+id, verdict, policy version, which rules fired, evidence *keys* and *counts*) and
+**never** the payload args, prompt, model output, or an evidence item's value or
+claim — exactly what a leak would expose and what a dashboard doesn't need.
+
+```python
+from evidence_gate import Gate, OTelSink, PolicySet
+
+gate = Gate(PolicySet.from_dir("policies"), telemetry=OTelSink())   # opt-in; NullSink by default
+# adds `evidence_gate.decision` / `evidence_gate.pending_review` to the active span.
+```
+
+`OTelSink` is a silent no-op when OpenTelemetry isn't installed or no span is
+recording, so wiring it in never requires the `otel` extra and a failing sink never
+fails a check. The hygiene boundary (`DecisionEvent.from_decision`) is pure and
+unit-tested independently of OTel.
 
 ## Layout
 
@@ -283,16 +380,21 @@ evidence_gate/
   audit.py           # hash-chained append-only log
   review.py          # human-in-the-loop routing
   trace.py           # ManifestBuilder — derive a manifest from tool-call traces
-  trace_adapters.py  # normalize() + simulate() — Trace-to-Gate replay
-  signing.py         # HMAC Signer/Verifier — chain hash + clearance tokens
+  trace_adapters.py  # normalize() + simulate() + coverage() + vendor presets
+  signing.py         # HMAC Signer/Verifier + require_clearance downstream guard
+  cli.py             # evidence-gate: replay + audit verify   [console entrypoint]
+  telemetry.py       # DecisionEvent + OTelSink — payload-safe span events [extra: otel]
   service.py         # create_app() — FastAPI gate service        [extra: service]
   client.py          # RemoteGate — fail-closed client            [extra: client]
   integrations/
-    langchain.py     # EvidenceGateCallbackHandler + GatePort seam [extra: langchain]
+    base.py          # GatePort / GateSession seam shared by all adapters
+    langchain.py     # EvidenceGateCallbackHandler                 [extra: langchain]
+    crewai.py        # gate_crew_tools() — gated BaseTool wrappers  [extra: crewai]
+    llamaindex.py    # gate_llama_tools() — gated FunctionTool wrappers [extra: llamaindex]
 policies/            # marketing.yaml, refund.yaml
 examples/            # demo_agent, refund_agent (RESTRICT), llm_agent (real LLM),
                      # remote_agent, trace_replay, langchain_agent
-tests/               # golden + property tests (89)
+tests/               # golden + property tests (127)
 ```
 
 ## Roadmap
@@ -325,17 +427,34 @@ tests/               # golden + property tests (89)
       `GatePort` seam (`integrations/langchain.py`, extra `langchain`)
 - [x] 89 golden + property + integration tests
 
+**Adapters, presets & telemetry — new in v0.4.0**
+
+- [x] **Per-vendor trace presets** — `LANGSMITH` / `LANGFUSE` / `OPENAI`
+      `TraceMapping`s over the generic seam (`trace_adapters.py`).
+- [x] **CrewAI + LlamaIndex adapters** — `gate_crew_tools` / `gate_llama_tools`
+      over the shared `GatePort` / `GateSession` seam (`integrations/`).
+- [x] **OTel span events** — `evidence_gate.decision` / `.pending_review` via
+      `OTelSink`, excluding raw args/prompt/model output (`telemetry.py`).
+- [x] 110 golden + property + integration tests
+
+**Adoption CLI, coverage & downstream enforcement — new in v0.4.1**
+
+- [x] **CLI entrypoint** — `evidence-gate replay <trace> …` and
+      `evidence-gate audit verify <log>` over the existing `simulate`/`AuditLog`
+      seams (the Phase-1 "CLI" surface); `cli.py`, `[project.scripts]`.
+- [x] **Residual-risk / coverage report** — `coverage()` classifies every tool in a
+      trace as gated / recognized-evidence / **unclassified**, surfacing
+      known-unwrapped tools by name; folded into `replay` output.
+- [x] **Downstream token enforcement** — `require_clearance(verifier, action=…)`
+      refuses any downstream call lacking a fresh, action-bound clearance token;
+      Verify is now load-bearing, not decorative (`signing.py`).
+
 **Pending for the alpha line (next)**
 
-- [ ] **Per-vendor trace normalizers** — LangSmith / Langfuse / OpenAI presets over
-      the generic `TraceMapping` (a few lines each; the seam is done).
-- [ ] **More framework adapters** — CrewAI, then LlamaIndex, reusing the `GatePort` seam.
-- [ ] **OTel span events** — `evidence_gate.decision` / `.pending_review`,
-      excluding raw args/prompt/model output (COMPARISON §6 #6).
-- [ ] **Downstream token enforcement** — tokens are issued and verifiable today but
-      not yet *required* by downstream tools; make verification a first-class gate.
-- [ ] **Persistent audit + review backends** — the log/queue are in-memory; add a
-      durable store for multi-process deployments.
+- [ ] **Persistent review backend** — the queue is in-memory (the audit log already
+      appends JSONL); add a durable store for multi-process deployments.
+- [ ] **Key rotation / revocation** — support a `kid` header so multiple `Signer`
+      keys validate during rotation; document rotate + revoke.
 
 **Deliberately deferred** (see [`DESIGN.md`](./DESIGN.md) §9)
 
@@ -348,6 +467,49 @@ tests/               # golden + property tests (89)
 - [ ] **RBAC/ABAC** — assumed upstream; the gate is orthogonal and additive.
 
 ## Release notes
+
+### v0.4.1 alpha — adoption CLI, coverage & downstream enforcement
+
+Three additions that make the *simulate → enforce* funnel walk-able end-to-end
+from a shell, and make the clearance token actually load-bearing — all still thin
+plumbing over the pure `check()` / `simulate()` / `Signer` seams:
+
+- **Adoption CLI.** `evidence-gate replay` runs a recorded trace through the gate
+  and prints the per-call verdicts (the Diagnose output); `evidence-gate audit
+  verify` recomputes a JSONL audit chain and exits non-zero if it was tampered.
+- **Residual-risk coverage.** `coverage()` classifies every tool in a trace as
+  gated, recognized-evidence, or **unclassified** — the last being a route no
+  policy or extractor accounts for. Surfaced by name in the `replay` output, so a
+  coverage gap reads as a warning, never a silent miss (vision §5.6).
+- **Downstream token enforcement.** `require_clearance(verifier, action=…)` guards
+  a downstream effect so it refuses any call without a fresh, action-bound
+  clearance token — a token minted for another action, forged, or expired is
+  rejected and the effect never runs. Verify is now enforcement, not decoration.
+
+Verified: 127 tests pass (the 110 from v0.4.0 unchanged); the base package still
+imports with no extra; `replay` and `audit verify` run end-to-end; the guard
+fails closed on missing / forged / expired / wrong-action tokens.
+
+### v0.4.0 alpha — adapters, presets & telemetry
+
+v0.3.0 opened the integration surface with one framework adapter and a generic
+trace mapping; v0.4.0 fills it in, still without touching the pure `check()` seam:
+
+- **Per-vendor trace presets.** `LANGSMITH` / `LANGFUSE` / `OPENAI` are ready-made
+  `TraceMapping`s for each vendor's per-observation shape — replay a real export
+  with `normalize(runs, LANGSMITH)` instead of hand-mapping dotted paths.
+- **Two more framework adapters.** `gate_crew_tools` (CrewAI) and `gate_llama_tools`
+  (LlamaIndex) join the LangChain handler over a shared `GatePort` / `GateSession`
+  seam. Both frameworks' event buses are observe-only, so each adapter gates the
+  tool *in the agent's own call path* — `BLOCK`/`REVIEW` raise before it runs.
+- **Payload-safe decision telemetry.** `OTelSink` adds an `evidence_gate.decision`
+  (or `.pending_review`) event to the active span carrying only the verdict, rules
+  fired, and evidence *keys/counts* — never args, prompts, model output, or
+  evidence values. Opt-in (`NullSink` by default), no-op without the `otel` extra.
+
+Verified: 110 tests pass (the 89 from v0.3 unchanged); the hygiene boundary is
+tested independently of OTel; every adapter stops a `BLOCK`/`REVIEW` in the agent's
+own call path.
 
 ### v0.3.0 alpha — the integration surface
 
