@@ -337,15 +337,11 @@ in-memory review queue · a demo agent exercising the marketing + refund scenari
 · golden/property tests for determinism and each failure mode.
 
 **Deliberately deferred:**
-- **Standalone HTTP gate service** — the `check()` boundary is already a pure
-  request/response; lifting it behind FastAPI is mechanical.
-- **Offline policy compiler** (SOP text → rule pack via an LLM, human-approved).
-  A "compile → approve → enforce" authoring lifecycle. Our runtime never needs it;
-  it's an authoring convenience.
-- **Trace ingestion** (LangSmith/Langfuse/OpenAI logs → candidate rules).
-- **Cryptographic signing** with real keys (we start with a hash chain; HMAC/asym
-  signatures are a drop-in upgrade).
-- **RBAC/ABAC** — assumed to live upstream; the gate is orthogonal and additive.
+- **Trace ingestion → candidate rules** (distinct from replay: mining logs to *propose* policy, not just simulate it).
+- **Asymmetric signing** — swap HMAC for public-key so verifiers need no shared secret; a drop-in over the current `Signer` (DESIGN §13.5).
+- **RBAC/ABAC** — assumed upstream; the gate is orthogonal and additive.
+
+*(Note: The HTTP gate service, cryptographic signing with HMAC keys, the offline policy compiler, and SQLite persistent review queues are fully realized as of v0.4.1 — see subsequent sections.)*
 
 ---
 
@@ -375,26 +371,46 @@ examples/demo_agent.py` to execute. A `pyproject.toml` + `uv.lock` pin everythin
 for reproducible runs (which matters for a system whose whole value is
 determinism).
 
+Managed with **`uv`**. The core (`schemas` · `policy` · `engine` · `gate` ·
+`audit` · `review` · `trace` · `trace_adapters` · `signing` · `telemetry` · `errors`) depends
+only on `pydantic` + `pyyaml`; everything network- or framework-facing is an
+optional extra, so the base install never pulls FastAPI / httpx / LangChain /
+CrewAI / LlamaIndex / OpenTelemetry. As-built (v0.4.1):
+
 ```
-pyproject.toml      # uv-managed; deps: pydantic, pyyaml; dev: pytest
+pyproject.toml      # uv-managed; base deps: pydantic, pyyaml; extras below
 uv.lock
-evidence_gate/
-  schemas.py        # EvidenceItem, EvidenceManifest, ProposedAction, Decision, AuditRecord
-  policy.py         # Policy/RulePack/Requirement models + YAML loader
+src/evidence_gate/
+  schemas.py        # EvidenceItem, EvidenceManifest, ProposedAction, Decision
+  policy.py         # typed rule models (incl. Comparison) + YAML loader
   engine.py         # PolicyEngine.evaluate() — pure, deterministic
   gate.py           # Gate.check() + @enforce decorator
-  audit.py          # hash-chained append-only AuditLog
-  review.py         # ReviewQueue protocol + in-memory impl
+  audit.py          # hash-chained append-only AuditLog (optional JSONL sink)
+  review.py         # ReviewQueue protocol + in-memory & SQLite impls
+  errors.py         # custom exceptions (ClearanceDenied, GateUnreachable, etc.)
+  trace.py          # ManifestBuilder — derive a manifest from tool-call traces
+  trace_adapters.py # normalize() + simulate() + coverage() + vendor presets
+  signing.py        # HMAC Signer/Verifier + require_clearance downstream guard
+  telemetry.py      # DecisionEvent + OTelSink — payload-safe span events [otel]
+  service.py        # create_app() — FastAPI gate service              [service]
+  client.py         # RemoteGate — fail-closed remote client           [client]
+  cli.py            # evidence-gate: replay + audit verify   [console entrypoint]
+  integrations/
+    base.py         # GatePort / GateSession seam shared by all adapters
+    langchain.py    # EvidenceGateCallbackHandler                    [langchain]
+    crewai.py       # gate_crew_tools() — gated BaseTool wrappers        [crewai]
+    llamaindex.py   # gate_llama_tools() — gated FunctionTool wrappers [llamaindex]
 policies/
   marketing.yaml
   refund.yaml
-examples/
-  demo_agent.py     # fake agent running the scenarios end-to-end
-tests/
-  test_engine.py    # golden + property tests (determinism, each failure mode)
-  test_gate.py      # structural rejection, routing, audit-before-return
-  test_audit.py     # hash-chain integrity / tamper detection
+examples/           # demo_agent, refund_agent (RESTRICT), llm_agent (real LLM),
+                    # remote_agent, trace_replay, langchain_agent
+tests/              # golden + property + integration tests (159)
 ```
+
+Extras: `service` (fastapi, uvicorn) · `client` (httpx) · `langchain`
+(langchain-core) · `crewai` (crewai) · `llamaindex` (llama-index-core) · `otel`
+(opentelemetry-api).
 
 ---
 
@@ -516,4 +532,81 @@ deny-by-default, the `compare` operand/numeric-guard cases, RESTRICT degradation
 through the decorator, trace-derived manifests driving real verdicts, and
 hash-chain tamper/reorder detection. Determinism is asserted directly —
 identical `(action, manifest, policy, now)` yields a byte-identical `Decision`.
+
+---
+
+## 14. Integration surface & signing (v0.3.0 alpha)
+
+v0.3.0 makes the core gate adoptable, adding support for distributed and secure agent architectures.
+
+### 14.1 Standalone HTTP Gate Service
+A FastAPI application serves the gate over HTTP (`service.py`). It exposes endpoints:
+- `/v1/check`: Receives a `ProposedAction` and `EvidenceManifest` (or builds a manifest from tool calls), executes the core engine, audits the verdict, and returns a JSON `Decision`.
+- `/v1/review` & `/v1/audit`: Provide JSON access to review tickets and the hash-chained audit log.
+
+### 14.2 Fail-Closed Remote Client
+The `RemoteGate` (`client.py`) targets the HTTP gate service with strict **fail-closed** rules:
+- Any network failure or non-200 response from the service raises `GateUnreachable`, preventing tool execution.
+- Ergonomic pattern mapping (`auto_instrument`) wraps tool methods based on name globs (e.g. `stripe_*` -> `billing.issue_refund`), intercepting tool calls transparently at the boundary.
+
+### 14.3 Cryptographic Signing
+To prevent clients from forging approval verdicts in distributed architectures, the gate issues cryptographically secure, HMAC-signed **clearance tokens** (`signing.py`):
+- For `ALLOW` and `RESTRICT` verdicts, the gate service signs a payload containing the `request_id`, `action`, and `effect` using a shared HMAC key (`Signer`).
+- The client validates this token (`Verifier`) before executing the target tool.
+- The `Signer` and `Verifier` also sign the audit log hash chain to ensure historical record integrity.
+
+### 14.4 Trace-to-Gate Replay
+The `normalize()` and `simulate()` routines (`trace_adapters.py`) allow historical tool-call logs (traces) to be mapped and replayed through a local or remote gate. This lets teams diagnose policy applicability on past agent trajectories before turning on active blocking.
+
+---
+
+## 15. Multi-framework adapters & telemetry (v0.4.0 alpha)
+
+v0.4.0 extends integration capability across agent frameworks and integrates clean, production-grade telemetry.
+
+### 15.1 The `GatePort` & `GateSession` Seams
+To keep the framework adapters decoupled from the communication protocol (in-process vs. HTTP), v0.4.0 introduces the `GatePort` interface (`integrations/base.py`). 
+A `GateSession` manages the state of one agent execution turn, acting as an in-memory compiler that aggregates evidence items generated by tools and queries the `GatePort` when sensitive tools are invoked.
+
+### 15.2 Agent Framework Adapters
+- **LangChain Callback**: `EvidenceGateCallbackHandler` collects tool outputs and enforces checks directly during LangChain agent executor runs.
+- **CrewAI & LlamaIndex**: Since these frameworks' event pipelines are non-blocking, the adapters (`gate_crew_tools` and `gate_llama_tools`) wrap the tool functions themselves, referencing a shared `GateSession` to assert clearance before the inner function runs.
+
+### 15.3 Payload-Safe Decision Telemetry
+The `OTelSink` (`telemetry.py`) records decisions to OpenTelemetry spans as span events (`evidence_gate.decision` or `evidence_gate.pending_review`). 
+To ensure strict privacy and avoid leaking sensitive logs, the telemetry event is designed to be payload-safe: it includes only non-sensitive scalars (e.g. action id, version, verdict, rule IDs, and evidence count) and explicitly excludes raw tool arguments, prompt contents, LLM statements, and the content values of evidence claims.
+
+---
+
+## 16. Adoption CLI, downstream enforcement, SQLite review, and compiler (v0.4.1 alpha)
+
+v0.4.1 provides command-line tools for onboarding, extends enforcement into backend services, and adds persistent enterprise queuing.
+
+### 16.1 The `evidence-gate` CLI
+A command-line interface (`cli.py`) wraps the onboarding and operational flows:
+- `evidence-gate replay <trace>`: Replays recorded JSON/JSONL runs and outputs step-by-step verdicts.
+- `evidence-gate audit verify <log>`: Verifies the integrity of a hash-chained log.
+- `evidence-gate policy lint <file>`: Statically validates a YAML policy file against the schema and flags warnings.
+- `evidence-gate policy compile <sop>`: Translates standard operating procedures into policy files.
+
+### 16.2 Residual-Risk Coverage Report
+Replay outputs a coverage breakdown separating tools into three groups:
+1. **Gated**: Sensitive actions wrapped by an enforce rule.
+2. **Recognized Evidence**: Informational tools whose outputs feed extractors.
+3. **Unclassified**: Raw tools executed in the trace that are neither gated nor recognized as evidence. This directly highlights security gaps (unwrapped sensitive tools) that may lead to untyped residual risk.
+
+### 16.3 Downstream Token Enforcement
+To ensure that authorization cannot be bypassed by directly invoking the backend execution tools, the `@require_clearance` decorator (`signing.py`) guards backend operations. It intercepts execution, verifying that a valid, unexpired, action-bound HMAC clearance token was supplied by the caller.
+
+### 16.4 SQLite Persistent Review Queue
+The `SQLiteReviewQueue` (`review.py`) replaces the prototype's volatile in-memory queue for multi-process or production environments:
+- Stores tickets in a SQLite table with a dedicated index on the `resolved` column for fast retrieval of pending reviews.
+- Uses Write-Ahead Logging (`journal_mode = WAL`) and a database busy timeout to safely support concurrent writes across multiple process/thread workers.
+- Generates monotonic, collision-free review ticket IDs directly via database sequence autoincrements.
+
+### 16.5 Offline Policy Compiler
+The policy compiler (`compiler.py`) translates natural language standard operating procedures (SOPs) into candidate policy YAML files using a generative LLM drafter:
+- **Offline Only**: The compiler module is kept strictly separate from the gate's runtime decision loop.
+- **Schema & Semantic Linter**: Automatically lints generated YAML drafts against the Pydantic schema and flags semantic warnings (e.g., rules that fail-open or lack stale routing).
+- **Mandatory Approval Workflow**: A draft is inert and cannot be activated to the policies folder unless an explicit `approve(approver)` invocation stamps it with a human operator's identity.
 ```

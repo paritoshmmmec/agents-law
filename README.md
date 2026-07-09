@@ -9,9 +9,12 @@
 > tokens, Trace-to-Gate replay, LangChain adapter); v0.4 rounded it out with
 > **per-vendor trace presets** (LangSmith / Langfuse / OpenAI), **CrewAI and
 > LlamaIndex adapters**, and **hygienic OTel decision telemetry**; and v0.4.1 adds
-> the **adoption CLI** (`evidence-gate replay` / `audit verify`), a **residual-risk
-> coverage report**, and **downstream token enforcement** (`require_clearance`) —
-> see [Roadmap](#roadmap). APIs are stabilizing but may still shift before v1.0.
+> the **adoption CLI** (`evidence-gate replay` / `audit verify` / `policy lint` /
+> `policy compile`), a **residual-risk coverage report**, **downstream token
+> enforcement** (`require_clearance`), a **durable SQLite review queue**
+> (`SQLiteReviewQueue`), and the **offline policy compiler** (SOP text → linted,
+> human-approved rule pack) — see [Roadmap](#roadmap). APIs are stabilizing but may
+> still shift before v1.0.
 
 A deterministic runtime enforcement layer that forces an agent to prove its
 reasoning against ground-truth evidence **before** a state-changing action is
@@ -101,7 +104,7 @@ the audit record is appended before `check()` returns.
 uv sync                         # install core deps into .venv
 uv run examples/demo_agent.py   # marketing tripwire: the four failure modes
 uv run examples/refund_agent.py # refund tripwire: cross-key compare + RESTRICT
-uv run pytest                   # 127 tests: failure modes, determinism, audit, remote, adapters, telemetry, cli
+uv run pytest                   # 159 tests: failure modes, determinism, audit, remote, adapters, telemetry, cli, review, compiler
 ```
 
 The core gate depends only on `pydantic` + `pyyaml`; `openai`/`python-dotenv` come
@@ -290,8 +293,8 @@ untouched `gate.check()`. See `examples/trace_replay.py`.
 
 ## CLI (`evidence-gate`)
 
-The same replay and audit-verify flows, from a shell — the Phase-1 onboarding
-surface, no Python required beyond an importable extractor module.
+The replay, audit-verify, and policy-authoring flows, from a shell — the Phase-1
+onboarding surface, no Python required beyond an importable extractor module.
 
 ```bash
 # Diagnose: what would the gate have decided on yesterday's trace?
@@ -305,14 +308,26 @@ evidence-gate replay trace.json \
 
 # Verify a hash-chained audit log written by AuditLog(path=...)
 evidence-gate audit verify audit.jsonl        # exit 0 = intact, 1 = tampered
+
+# Lint a candidate policy against the engine schema (no LLM, no write)
+evidence-gate policy lint draft.yaml          # exit 0 = clean, 1 = findings by field
+
+# Author: draft a policy from an SOP via an LLM, then require sign-off to activate
+evidence-gate policy compile sop.txt --approve alice --out policies
+#   drafted -> linted -> approved(alice) -> wrote policies/<name>.yaml
 ```
 
 `--mapping` takes a preset (`langsmith` / `langfuse` / `openai`) or a
 `TraceMapping` JSON file; `--extractor TOOL=module:function` registers an evidence
-extractor (uvicorn-style import). Every run prints a **coverage** section that
-names any *unclassified* tool — a call reached in the trace that no `--action` or
-`--extractor` accounts for — so residual risk is surfaced, never silently missed.
+extractor (uvicorn-style import). Every `replay` run prints a **coverage** section
+that names any *unclassified* tool — a call reached in the trace that no `--action`
+or `--extractor` accounts for — so residual risk is surfaced, never silently missed.
 `--now` injects the evaluation time for reproducible runs.
+
+`policy compile` is **offline authoring only** — it never runs on the gate's
+decision path, and `--approve` is mandatory: a drafted-but-unapproved policy cannot
+reach enforcement. The draft is linted against the exact `Policy` schema the engine
+consumes, so anything that activates is something the engine can run.
 
 ## Framework adapters
 
@@ -394,7 +409,7 @@ evidence_gate/
 policies/            # marketing.yaml, refund.yaml
 examples/            # demo_agent, refund_agent (RESTRICT), llm_agent (real LLM),
                      # remote_agent, trace_replay, langchain_agent
-tests/               # golden + property tests (127)
+tests/               # golden + property + integration tests (159)
 ```
 
 ## Roadmap
@@ -448,18 +463,19 @@ tests/               # golden + property tests (127)
 - [x] **Downstream token enforcement** — `require_clearance(verifier, action=…)`
       refuses any downstream call lacking a fresh, action-bound clearance token;
       Verify is now load-bearing, not decorative (`signing.py`).
+- [x] **Persistent review backend** — SQLite-backed `SQLiteReviewQueue` that survives
+      restarts and is safe to share across threads and processes (`review.py`).
+- [x] **Offline policy compiler** — LLM-driven draft generator (`compiler.py`) from
+      plain-text SOP with static semantic linter and mandatory sign-off workflow
+      (`policy compile` / `policy lint`).
 
 **Pending for the alpha line (next)**
 
-- [ ] **Persistent review backend** — the queue is in-memory (the audit log already
-      appends JSONL); add a durable store for multi-process deployments.
 - [ ] **Key rotation / revocation** — support a `kid` header so multiple `Signer`
       keys validate during rotation; document rotate + revoke.
 
 **Deliberately deferred** (see [`DESIGN.md`](./DESIGN.md) §9)
 
-- [ ] **Offline policy compiler** (SOP text → reviewed rule pack via an LLM) +
-      approve/version workflow (COMPARISON §6 #7).
 - [ ] **Trace ingestion → candidate rules** (distinct from replay: mining logs to
       *propose* policy, not just simulate it).
 - [ ] **Asymmetric signing** — swap HMAC for public-key so verifiers need no shared
@@ -485,8 +501,13 @@ plumbing over the pure `check()` / `simulate()` / `Signer` seams:
   a downstream effect so it refuses any call without a fresh, action-bound
   clearance token — a token minted for another action, forged, or expired is
   rejected and the effect never runs. Verify is now enforcement, not decoration.
+- **Persistent review backend.** SQLite-backed `SQLiteReviewQueue` that survives
+  restarts and is safe to share across threads and processes (`review.py`).
+- **Offline policy compiler.** LLM-driven draft generator (`compiler.py`) from
+  plain-text SOP with static semantic linter and mandatory sign-off workflow
+  (`policy compile` / `policy lint`).
 
-Verified: 127 tests pass (the 110 from v0.4.0 unchanged); the base package still
+Verified: 159 tests pass; the base package still
 imports with no extra; `replay` and `audit verify` run end-to-end; the guard
 fails closed on missing / forged / expired / wrong-action tokens.
 
