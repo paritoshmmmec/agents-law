@@ -1,0 +1,87 @@
+site_name: Evidence Gate
+site_description: >-
+  Deterministic runtime enforcement that forces an agent to prove its reasoning
+  against ground-truth evidence before a state-changing action executes.
+site_url: https://paritoshmmmec.github.io/agents-law/docs/
+repo_url: https://github.com/paritoshmmmec/agents-law
+repo_name: paritoshmmmec/agents-law
+edit_uri: edit/main/site-src/
+
+# Docs sources live in site-src/ (the repo's docs/ folder holds internal notes).
+docs_dir: site-src
+# Build output nests under dist/docs so the landing page can sit at dist/index.html.
+site_dir: dist/docs
+
+theme:
+  name: material
+  logo: assets/banner.svg
+  favicon: assets/banner.svg
+  icon:
+    repo: fontawesome/brands/github
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: black
+      accent: deep orange
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: deep orange
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - navigation.instant
+    - content.code.copy
+    - search.suggest
+    - search.highlight
+    - toc.follow
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/paritoshmmmec/agents-law
+  # Link back to the marketing landing page served at the site root.
+  homepage: https://paritoshmmmec.github.io/agents-law/
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets:
+      base_path: ["."]
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Architecture: architecture.md
+  - Guides:
+      - Quick start: quickstart.md
+      - Running a real agent: running-an-agent.md
+      - Usage & policies: usage.md
+      - Remote gate: remote-gate.md
+      - Trace-to-Gate replay: trace-replay.md
+      - CLI: cli.md
+      - Framework adapters: adapters.md
+      - Decision telemetry: telemetry.md
+  - Roadmap: roadmap.md
+  - Vision: vision.md
