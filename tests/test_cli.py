@@ -184,3 +184,46 @@ def test_audit_verify_missing_file(capsys):
     code = main(["audit", "verify", "/tmp/does-not-exist-eg.jsonl"])
     assert code == 2
     assert "no such file" in capsys.readouterr().err
+
+
+# --- policy lint -----------------------------------------------------------
+
+_VALID_POLICY = """\
+version: "v1"
+action: "refund.issue"
+rules:
+  - id: approved
+    requirements:
+      - key: "refund.manager_approved"
+        must_exist: true
+        equals: true
+    effect_on_fail: block
+"""
+
+
+def test_policy_lint_clean(tmp_path, capsys):
+    f = tmp_path / "refund.yaml"
+    f.write_text(_VALID_POLICY)
+    code = main(["policy", "lint", str(f)])
+    assert code == 0
+    assert "clean" in capsys.readouterr().out
+
+
+def test_policy_lint_reports_errors_nonzero(tmp_path, capsys):
+    f = tmp_path / "bad.yaml"
+    f.write_text("- not\n- a\n- mapping\n")
+    code = main(["policy", "lint", str(f)])
+    assert code == 1
+    assert "ERROR" in capsys.readouterr().out
+
+
+def test_policy_lint_missing_file(capsys):
+    code = main(["policy", "lint", "/tmp/does-not-exist-eg.yaml"])
+    assert code == 2
+    assert "no such file" in capsys.readouterr().err
+
+
+def test_policy_compile_missing_sop(capsys):
+    code = main(["policy", "compile", "/tmp/does-not-exist-eg.txt"])
+    assert code == 2
+    assert "no such file" in capsys.readouterr().err
