@@ -6,9 +6,18 @@ Review / Block. No LLM runs inside the gate. See DESIGN.md.
 """
 
 from evidence_gate.audit import AuditLog
+from evidence_gate.compiler import (
+    ApprovalRequired,
+    DraftError,
+    LintFinding,
+    LintReport,
+    PolicyDraft,
+    draft_from_sop,
+    lint_policy_yaml,
+)
 from evidence_gate.gate import ActionBlocked, Gate, GateResult
 from evidence_gate.policy import Comparison, PolicySet
-from evidence_gate.review import InMemoryReviewQueue, ReviewQueue
+from evidence_gate.review import InMemoryReviewQueue, ReviewQueue, SQLiteReviewQueue
 from evidence_gate.schemas import (
     Decision,
     Effect,
@@ -48,12 +57,14 @@ from evidence_gate.trace_adapters import (
 
 __all__ = [
     "ActionBlocked",
+    "ApprovalRequired",
     "AuditLog",
     "ClearanceRequired",
     "Comparison",
     "CoverageReport",
     "Decision",
     "DecisionEvent",
+    "DraftError",
     "Effect",
     "EvidenceItem",
     "EvidenceManifest",
@@ -64,15 +75,19 @@ __all__ = [
     "InMemoryReviewQueue",
     "LANGFUSE",
     "LANGSMITH",
+    "LintFinding",
+    "LintReport",
     "ManifestBuilder",
     "NormalizeResult",
     "NullSink",
     "OPENAI",
     "OTelSink",
+    "PolicyDraft",
     "PolicySet",
     "ProposedAction",
     "ReviewQueue",
     "RuleResult",
+    "SQLiteReviewQueue",
     "SimReport",
     "Signer",
     "TelemetrySink",
@@ -82,6 +97,8 @@ __all__ = [
     "TraceMapping",
     "Verifier",
     "coverage",
+    "draft_from_sop",
+    "lint_policy_yaml",
     "normalize",
     "require_clearance",
     "simulate",
