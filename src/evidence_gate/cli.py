@@ -24,6 +24,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from evidence_gate.audit import AuditLog, AuditRecord
+from evidence_gate.compiler import (
+    DraftError,
+    LintReport,
+    draft_from_sop,
+    lint_policy_yaml,
+)
 from evidence_gate.gate import Gate
 from evidence_gate.policy import PolicySet
 from evidence_gate.signing import Signer
@@ -212,6 +218,72 @@ def cmd_audit_verify(args: argparse.Namespace) -> int:
     return 0 if intact else 1
 
 
+# --- subcommand: policy lint / compile -------------------------------------
+
+
+def _print_lint(report: LintReport) -> None:
+    for f in report.findings:
+        marker = "ERROR" if f.level == "error" else "warn "
+        print(f"  [{marker}] {f.location}: {f.message}")
+    if not report.findings:
+        print("  (clean — no findings)")
+
+
+def cmd_policy_lint(args: argparse.Namespace) -> int:
+    """Lint a candidate policy YAML against the engine's schema. No LLM, no write."""
+    path = Path(args.file)
+    if not path.is_file():
+        raise CLIError(f"{path}: no such file")
+    _, report = lint_policy_yaml(path.read_text())
+    print(f"{path}:")
+    _print_lint(report)
+    # Errors mean the engine could not run this pack — a non-zero exit so this
+    # is usable as a pre-commit / CI check on a policy directory.
+    return 0 if report.ok else 1
+
+
+def cmd_policy_compile(args: argparse.Namespace) -> int:
+    """Draft a policy from SOP text via the LLM, lint it, and (only with explicit
+    approval) activate it. Offline authoring tooling — never on the runtime path.
+    """
+    sop_path = Path(args.sop)
+    if not sop_path.is_file():
+        raise CLIError(f"{sop_path}: no such file")
+
+    # Build the drafter lazily so `policy lint` needs no model client at all.
+    from evidence_gate.compiler import openai_drafter
+
+    try:
+        drafter = openai_drafter(model=args.model)
+        draft = draft_from_sop(sop_path.read_text(), drafter)
+    except DraftError as exc:
+        raise CLIError(str(exc)) from exc
+
+    print("Drafted candidate policy:\n")
+    print(draft.yaml_text)
+    print("Lint:")
+    _print_lint(draft.lint)
+
+    if not draft.lint.ok:
+        print("\nDraft has blocking errors; not eligible for approval. Fix the SOP or edit by hand.")
+        return 1
+
+    if not args.approve:
+        print(
+            "\nDraft is inert. Re-run with --approve APPROVER --out DIR to activate "
+            "(mandatory human sign-off — DESIGN §9)."
+        )
+        return 0
+
+    if not args.out:
+        raise CLIError("--approve requires --out DIR (where to write the activated policy)")
+    now = _parse_now(args.now)
+    draft.approve(args.approve, now)
+    written = draft.activate(args.out)
+    print(f"\nApproved by {args.approve} and activated -> {written}")
+    return 0
+
+
 # --- parser ----------------------------------------------------------------
 
 
@@ -256,6 +328,28 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("log", help="JSONL audit log written by AuditLog(path=...)")
     verify.add_argument("--key", help="HMAC key if the chain was signed (Signer key)")
     verify.set_defaults(func=cmd_audit_verify)
+
+    policy = sub.add_parser("policy", help="offline policy authoring (lint / compile)")
+    policy_sub = policy.add_subparsers(dest="policy_command", required=True)
+
+    lint = policy_sub.add_parser("lint", help="lint a candidate policy YAML (no LLM, no write)")
+    lint.add_argument("file", help="policy YAML file to validate against the engine schema")
+    lint.set_defaults(func=cmd_policy_lint)
+
+    compile_ = policy_sub.add_parser(
+        "compile",
+        help="draft a policy from SOP text via an LLM; approval is required to activate",
+    )
+    compile_.add_argument("sop", help="path to a plain-text SOP to draft a policy from")
+    compile_.add_argument("--model", help="LLM model id (default: LLM_MODEL env or built-in)")
+    compile_.add_argument(
+        "--approve",
+        metavar="APPROVER",
+        help="human approver id; required to activate (mandatory sign-off, DESIGN §9)",
+    )
+    compile_.add_argument("--out", help="policy directory to write the activated YAML into")
+    compile_.add_argument("--now", help="ISO8601 approval time (default: current UTC)")
+    compile_.set_defaults(func=cmd_policy_compile)
 
     return parser
 
